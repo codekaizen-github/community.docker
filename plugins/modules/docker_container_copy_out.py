@@ -10,17 +10,15 @@ __metaclass__ = type
 
 DOCUMENTATION = '''
 ---
-module: docker_container_copy_into
+module: docker_container_copy_out
 
-short_description: Copy a file into a Docker container
+short_description: Copy a file from a Docker container to the managed node.
 
 version_added: 3.4.0
 
 description:
-  - Copy a file into a Docker container.
+  - Copy a file from a Docker container to the managed node.
   - Similar to C(docker cp).
-  - To copy files in a non-running container, you must provide the O(owner_id) and O(group_id) options.
-    This is also necessary if the container does not contain a C(/bin/sh) shell with an C(id) tool.
 
 attributes:
   check_mode:
@@ -35,29 +33,13 @@ attributes:
 options:
   container:
     description:
-      - The name of the container to copy files to.
+      - The name of the container to copy files from.
     type: str
     required: true
   path:
     description:
       - Path to a file on the managed node.
-      - Mutually exclusive with O(content). One of O(content) and O(path) is required.
     type: path
-  content:
-    description:
-      - The file's content.
-      - If you plan to provide binary data, provide it pre-encoded to base64, and set O(content_is_b64=true).
-      - Mutually exclusive with O(path). One of O(content) and O(path) is required.
-    type: str
-  content_is_b64:
-    description:
-      - If set to V(true), the content in O(content) is assumed to be Base64 encoded and
-        will be decoded before being used.
-      - To use binary O(content), it is better to keep it Base64 encoded and let it
-        be decoded by this option. Otherwise you risk the data to be interpreted as
-        UTF-8 and corrupted.
-    type: bool
-    default: false
   container_path:
     description:
       - Path to a file inside the Docker container.
@@ -78,22 +60,19 @@ options:
     description:
       - The owner ID to use when writing the file to disk.
       - If provided, O(group_id) must also be provided.
-      - If not provided, the module will try to determine the user and group ID for the current user in the container.
-        This will only work if C(/bin/sh) is present in the container and the C(id) binary or shell builtin is available.
-        Also the container must be running.
+      - If not provided, the module will default to the current user's UID.
     type: int
   group_id:
     description:
       - The group ID to use when writing the file to disk.
       - If provided, O(owner_id) must also be provided.
-      - If not provided, the module will try to determine the user and group ID for the current user in the container.
-        This will only work if C(/bin/sh) is present in the container and the C(id) binary or shell builtin is available.
-        Also the container must be running.
+      - If not provided, the module defaults to the current user's GID.
     type: int
   mode:
     description:
       - The file mode to use when writing the file to disk.
-      - Will use the file's mode from the source system if this option is not provided.
+      - Please note that the mode is always interpreted as an octal number.
+      - If not provided, the module will default to 0o644.
     type: int
   force:
     description:
@@ -118,29 +97,51 @@ requirements:
 '''
 
 EXAMPLES = '''
-- name: Copy a file into the container
-  community.docker.docker_container_copy_into:
-    container: mydata
-    path: /home/user/data.txt
-    container_path: /data/input.txt
+- name: Copy a file out of a container
+    community.docker.docker_container_copy_out:
+        container: mydata
+        path: /tmp/test_out.txt
+        container_path: /tmp/test.txt
 
-- name: Copy a file into the container with owner, group, and mode set
-  community.docker.docker_container_copy_into:
+- name: Copy a file out of a container with owner, group, and mode set
+  community.docker.docker_container_copy_out:
     container: mydata
-    path: /home/user/bin/runme.o
-    container_path: /bin/runme
-    owner: 0  # root
-    group: 0  # root
+    path: /tmp/test_out.txt
+    container_path: /tmp/test.txt
+    owner_id: 0  # root
+    group_id: 0  # root
     mode: 0o755  # readable and executable by all users, writable by root
 '''
 
 RETURN = '''
+changed:
+    description:
+        - Indicates whether the file was copied.
+    type: bool
+failed:
+    description:
+        - Indicates whether the module failed.
+    type: bool
 container_path:
-  description:
-    - The actual path in the container.
-    - Can only be different from O(container_path) when O(follow=true).
-  type: str
-  returned: success
+    description:
+        - The path of the file in the container.
+    type: str
+managed_path:
+    description:
+        - The path of the file on the managed node.
+    type: path
+mode:
+    description:
+        - The file mode of the copied file.
+    type: int
+owner_id:
+    description:
+        - The owner ID of the copied file.
+    type: int
+group_id:
+    description:
+        - The group ID of the copied file.
+    type: int
 '''
 
 import base64
@@ -162,11 +163,8 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
     DockerFileCopyError,
     DockerFileNotFound,
     DockerUnexpectedError,
-    determine_user_group,
     fetch_file,
     fetch_file_ex,
-    put_file,
-    put_file_content,
     stat_file,
 )
 
@@ -265,18 +263,6 @@ def is_container_file_not_regular_file(container_stat):
         if container_stat['mode'] & (1 << bit) != 0:
             return True
     return False
-
-
-def get_container_file_mode(container_stat):
-    mode = container_stat['mode'] & 0xFFF
-    if container_stat['mode'] & (1 << (32 - 9)) != 0:  # ModeSetuid
-        mode |= stat.S_ISUID  # set UID bit
-    if container_stat['mode'] & (1 << (32 - 10)) != 0:  # ModeSetgid
-        mode |= stat.S_ISGID  # set GID bit
-    if container_stat['mode'] & (1 << (32 - 12)) != 0:  # ModeSticky
-        mode |= stat.S_ISVTX  # sticky bit
-    return mode
-
 
 def add_other_diff(diff, in_path, member):
     if diff is None:
@@ -507,7 +493,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
     if file_stat.st_size != regular_stat['size']:
         retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
         return container_path, mode, False
-    if mode != get_container_file_mode(regular_stat):
+    if mode != file_stat.st_mode & 0xFFF:
         retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
         return container_path, mode, False
 
@@ -518,9 +504,12 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
     def process_regular(in_path, tar, member):
         # Check things like user/group ID and mode
         if any([
-            member.mode & 0xFFF != mode,
-            member.uid != owner_id,
-            member.gid != group_id,
+            # member.mode & 0xFFF != mode,
+            file_stat.st_mode & 0xFFF != mode,
+            # member.uid != owner_id,
+            file_stat.st_uid != owner_id,
+            # member.gid != group_id,
+            file_stat.st_gid != group_id,
             not stat.S_ISREG(file_stat.st_mode),
             member.size != file_stat.st_size,
         ]):
@@ -553,7 +542,9 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
 
     def process_other(in_path, member):
         add_other_diff(diff, in_path, member)
+
         return container_path, mode, False
+
 
     return fetch_file_ex(
         client,
@@ -565,202 +556,6 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         process_other=process_other,
         follow_links=follow_links,
     )
-
-
-def copy_file_into_container(client, container, managed_path, container_path, follow_links, local_follow_links,
-                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
-    if diff:
-        diff = {}
-    else:
-        diff = None
-
-    container_path, mode, idempotent = is_file_idempotent(
-        client,
-        container,
-        managed_path,
-        container_path,
-        follow_links,
-        local_follow_links,
-        owner_id,
-        group_id,
-        mode,
-        force=force,
-        diff=diff,
-        max_file_size_for_diff=max_file_size_for_diff,
-    )
-    changed = not idempotent
-
-    if changed and not client.module.check_mode:
-        put_file(
-            client,
-            container,
-            in_path=managed_path,
-            out_path=container_path,
-            user_id=owner_id,
-            group_id=group_id,
-            mode=mode,
-            follow_links=local_follow_links,
-        )
-
-    result = dict(
-        container_path=container_path,
-        changed=changed,
-    )
-    if diff:
-        result['diff'] = diff
-    client.module.exit_json(**result)
-
-
-def is_content_idempotent(client, container, content, container_path, follow_links, owner_id, group_id, mode,
-                          force=False, diff=None, max_file_size_for_diff=1):
-    if diff is not None:
-        if len(content) > max_file_size_for_diff > 0:
-            diff['src_larger'] = max_file_size_for_diff
-        elif is_binary(content):
-            diff['src_binary'] = 1
-        else:
-            diff['after_header'] = 'dynamically generated'
-            diff['after'] = to_text(content)
-
-    # When forcing and we're not following links in the container, go!
-    if force and not follow_links:
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff)
-        return container_path, mode, False
-
-    # Resolve symlinks in the container (if requested), and get information on container's file
-    real_container_path, regular_stat, link_target = stat_file(
-        client,
-        container,
-        in_path=container_path,
-        follow_links=follow_links,
-    )
-
-    # Follow links in the Docker container?
-    if follow_links:
-        container_path = real_container_path
-
-    # If the file wasn't found, continue
-    if regular_stat is None:
-        if diff is not None:
-            diff['before_header'] = container_path
-            diff['before'] = ''
-        return container_path, mode, False
-
-    # When forcing, go!
-    if force:
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        return container_path, mode, False
-
-    # If force is set to False, and the destination exists, assume there's nothing to do
-    if force is False:
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        copy_dst_to_src(diff)
-        return container_path, mode, True
-
-    # Basic idempotency checks
-    if link_target is not None:
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        return container_path, mode, False
-    if is_container_file_not_regular_file(regular_stat):
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        return container_path, mode, False
-    if len(content) != regular_stat['size']:
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        return container_path, mode, False
-    if mode != get_container_file_mode(regular_stat):
-        retrieve_diff(client, container, container_path, follow_links, diff, max_file_size_for_diff, regular_stat, link_target)
-        return container_path, mode, False
-
-    # Fetch file from container
-    def process_none(in_path):
-        if diff is not None:
-            diff['before'] = ''
-        return container_path, mode, False
-
-    def process_regular(in_path, tar, member):
-        # Check things like user/group ID and mode
-        if any([
-            member.mode & 0xFFF != mode,
-            member.uid != owner_id,
-            member.gid != group_id,
-            member.size != len(content),
-        ]):
-            add_diff_dst_from_regular_member(diff, max_file_size_for_diff, in_path, tar, member)
-            return container_path, mode, False
-
-        tar_f = tar.extractfile(member)  # in Python 2, this *cannot* be used in `with`...
-        is_equal = are_fileobjs_equal_with_diff_of_first(tar_f, io.BytesIO(content), member.size, diff, max_file_size_for_diff, in_path)
-        return container_path, mode, is_equal
-
-    def process_symlink(in_path, member):
-        if diff is not None:
-            diff['before_header'] = in_path
-            diff['before'] = member.linkname
-
-        return container_path, mode, False
-
-    def process_other(in_path, member):
-        add_other_diff(diff, in_path, member)
-        return container_path, mode, False
-
-    return fetch_file_ex(
-        client,
-        container,
-        in_path=container_path,
-        process_none=process_none,
-        process_regular=process_regular,
-        process_symlink=process_symlink,
-        process_other=process_other,
-        follow_links=follow_links,
-    )
-
-
-def copy_content_into_container(client, container, content, container_path, follow_links,
-                                owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
-    if diff:
-        diff = {}
-    else:
-        diff = None
-
-    container_path, mode, idempotent = is_content_idempotent(
-        client,
-        container,
-        content,
-        container_path,
-        follow_links,
-        owner_id,
-        group_id,
-        mode,
-        force=force,
-        diff=diff,
-        max_file_size_for_diff=max_file_size_for_diff,
-    )
-    changed = not idempotent
-
-    if changed and not client.module.check_mode:
-        put_file_content(
-            client,
-            container,
-            content=content,
-            out_path=container_path,
-            user_id=owner_id,
-            group_id=group_id,
-            mode=mode,
-        )
-
-    result = dict(
-        container_path=container_path,
-        changed=changed,
-    )
-    if diff:
-        # Since the content is no_log, make sure that the before/after strings look sufficiently different
-        key = generate_insecure_key()
-        diff['scrambled_diff'] = base64.b64encode(key)
-        for k in ('before', 'after'):
-            if k in diff:
-                diff[k] = scramble(diff[k], key)
-        result['diff'] = diff
-    client.module.exit_json(**result)
 
 def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links,
                              owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
@@ -786,16 +581,6 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
     changed = not idempotent
 
     if changed and not client.module.check_mode:
-        # put_file(
-        #     client,
-        #     container,
-        #     in_path=managed_path,
-        #     out_path=container_path,
-        #     user_id=owner_id,
-        #     group_id=group_id,
-        #     mode=mode,
-        #     follow_links=local_follow_links,
-        # )
         fetch_file(
             client,
             container,
@@ -803,10 +588,31 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             managed_path,
             follow_links=follow_links,
         )
+        # Change the file mode, owner, and group
+        os.chmod(managed_path, mode)
+        os.chown(managed_path, owner_id, group_id)
+
+    # TODO: Calculate and return checksums of the file. If check mode, use the src file to calculate the checksums. Else, use the dest file.
+    # md5sum = None
+    # checksum = None
+    # if os.path.isfile(src):
+    #     try:
+    #         checksum = client.module.sha1(src)
+    #     except (OSError, IOError) as e:
+    #         client.module.warn("Unable to calculate src checksum, assuming change: %s" % to_native(e))
+    #     try:
+    #         # Backwards compat only.  This will be None in FIPS mode
+    #         md5sum = client.module.md5(src)
+    #     except ValueError:
+    #         pass
 
     result = dict(
-        container_path=container_path,
         changed=changed,
+        container_path=container_path,
+        managed_path=managed_path,
+        mode=mode,
+        owner_id=owner_id,
+        group_id=group_id,
     )
     if diff:
         result['diff'] = diff
@@ -866,6 +672,15 @@ def main():
         container_path = os.path.join(os.path.sep, container_path)
     container_path = os.path.normpath(container_path)
 
+    if mode is None:
+        mode = 0o644
+
+    if group_id is None:
+        group_id = os.getgid()
+
+    if owner_id is None:
+        owner_id = os.getuid()
+
     try:
         # TODO: Use fetch_file() method from plugins/module_utils/copy.py
         copy_file_out_of_container(
@@ -882,13 +697,6 @@ def main():
             diff=client.module._diff,
             max_file_size_for_diff=max_file_size_for_diff,
         )
-        # fetch_file(
-        #     client,
-        #     container,
-        #     container_path,
-        #     managed_path,
-        #     follow_links=follow,
-        # )
     except NotFound as exc:
         client.fail('Could not find container "{1}" or resource in it ({0})'.format(exc, container))
     except APIError as exc:
