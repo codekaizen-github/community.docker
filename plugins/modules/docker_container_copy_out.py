@@ -339,7 +339,7 @@ def retrieve_diff(client, container, container_path, follow_links, diff, max_fil
         diff['before_header'] = in_path
         diff['before'] = member.linkname
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
         add_other_diff(diff, in_path, member)
 
     fetch_file_ex(
@@ -447,8 +447,6 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
 
     if mode is None:
         mode = stat.S_IMODE(file_stat.st_mode)
-    if not stat.S_ISLNK(file_stat.st_mode) and not stat.S_ISREG(file_stat.st_mode):
-        raise DockerFileCopyError('Local path {managed_path} is not a symbolic link or file')
 
     if diff is not None:
         if file_stat.st_size > max_file_size_for_diff > 0:
@@ -540,7 +538,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         local_link_target = os.readlink(managed_path)
         return container_path, mode, member.linkname == local_link_target
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
         add_other_diff(diff, in_path, member)
 
         return container_path, mode, False

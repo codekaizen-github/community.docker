@@ -352,7 +352,7 @@ def retrieve_diff(client, container, container_path, follow_links, diff, max_fil
         diff['before_header'] = in_path
         diff['before'] = member.linkname
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
         add_other_diff(diff, in_path, member)
 
     fetch_file_ex(
@@ -546,7 +546,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         local_link_target = os.readlink(managed_path)
         return container_path, mode, member.linkname == local_link_target
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
         add_other_diff(diff, in_path, member)
         return container_path, mode, False
 
@@ -694,7 +694,7 @@ def is_content_idempotent(client, container, content, container_path, follow_lin
 
         return container_path, mode, False
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
         add_other_diff(diff, in_path, member)
         return container_path, mode, False
 

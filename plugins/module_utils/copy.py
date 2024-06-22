@@ -320,7 +320,10 @@ def fetch_file_ex(client, container, in_path, process_none, process_regular, pro
                 if member.isfile():
                     result = process_regular(in_path, tar, member)
                     continue
-                result = process_other(in_path, member)
+                if member.isdir():
+                    result = process_other(in_path, tar, member)
+                    return result
+                result = process_other(in_path, tar, member)
             if symlink_member:
                 if not follow_links:
                     return process_symlink(in_path, symlink_member)
@@ -358,7 +361,12 @@ def fetch_file(client, container, in_path, out_path, follow_links=False, log=Non
         os.symlink(member.linkname, b_out_path)
         return in_path
 
-    def process_other(in_path, member):
+    def process_other(in_path, tar, member):
+        if member.isdir():
+            if os.path.exists(b_out_path):
+                shutil.rmtree(b_out_path)
+            tar.extractall(out_path)
+            return in_path
         raise DockerFileCopyError('Remote file "%s" is not a regular file or a symbolic link' % in_path)
 
     return fetch_file_ex(client, container, in_path, process_none, process_regular, process_symlink, process_other, follow_links=follow_links, log=log)
