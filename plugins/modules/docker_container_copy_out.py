@@ -629,8 +629,6 @@ def main():
         group_id=dict(type='int'),
         mode=dict(type='int'),
         force=dict(type='bool'),
-        content=dict(type='str', no_log=True),
-        content_is_b64=dict(type='bool', default=False),
 
         # Undocumented parameters for use by the action plugin
         _max_file_size_for_diff=dict(type='int'),
@@ -640,11 +638,7 @@ def main():
         argument_spec=argument_spec,
         min_docker_api_version='1.20',
         supports_check_mode=True,
-        mutually_exclusive=[('path', 'content')],
         required_together=[('owner_id', 'group_id')],
-        required_by={
-            'content': ['mode'],
-        },
     )
 
     container = client.module.params['container']
@@ -656,17 +650,7 @@ def main():
     group_id = client.module.params['group_id']
     mode = client.module.params['mode']
     force = client.module.params['force']
-    content = client.module.params['content']
     max_file_size_for_diff = client.module.params['_max_file_size_for_diff'] or 1
-
-    if content is not None:
-        if client.module.params['content_is_b64']:
-            try:
-                content = base64.b64decode(content)
-            except Exception as e:  # depending on Python version and error, multiple different exceptions can be raised
-                client.fail('Cannot Base64 decode the content option: {0}'.format(e))
-        else:
-            content = to_bytes(content)
 
     if not container_path.startswith(os.path.sep):
         container_path = os.path.join(os.path.sep, container_path)
