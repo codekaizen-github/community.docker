@@ -1,0 +1,113 @@
+---
+# Copyright (c) Ansible Project
+# GNU General Public License v3.0+ (see LICENSES/GPL-3.0-or-later.txt or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+- name: Registering container name
+  set_fact:
+    cname: "{{ cname_prefix ~ '-f' }}"
+- name: Registering container name
+  set_fact:
+    cnames: "{{ cnames + [cname] }}"
+
+# Create container
+
+- name: Create container
+  docker_container:
+    image: "{{ docker_test_image_alpine }}"
+    command:
+      - /bin/sh
+      - "-c"
+      - >-
+        mkdir -p /test/container/path;
+        echo -n "Content 1" > /test/container/path/file_1;
+        echo -n "Content 2" > /test/container/path/file_2;
+        echo -n "Content 3" > /test/container/path/file_3;
+        sleep 10m;
+    name: "{{ cname }}"
+    state: started
+
+# Create files
+
+# Do not create file 1
+
+# Create file 2 with different content
+- name: Create file 2
+  copy:
+    dest: "{{ remote_tmp_dir }}/file_2"
+    content: Not Content 2
+    mode: 0644
+  register: create_2
+
+# Create file 3 with same content
+- name: Create file 3
+  copy:
+    dest: "{{ remote_tmp_dir }}/file_3"
+    content: Content 3
+    mode: 0644
+  register: create_3
+
+################################################################################################
+# Do tests
+
+######################### Copy
+
+- name: Copy file 1
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_1
+    path: "{{ remote_tmp_dir }}/file_1"
+  register: result_1
+
+- name: Copy file 2
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_2
+    path: "{{ remote_tmp_dir }}/file_2"
+  register: result_2
+
+- name: Copy file 3
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_3
+    path: "{{ remote_tmp_dir }}/file_3"
+  register: result_3
+
+- name: Stat file 1
+  stat:
+    path: "{{ remote_tmp_dir }}/file_1"
+  register: stat_1
+
+- name: Stat file 2
+  stat:
+    path: "{{ remote_tmp_dir }}/file_2"
+  register: stat_2
+
+- name: Stat file 3
+  stat:
+    path: "{{ remote_tmp_dir }}/file_3"
+  register: stat_3
+
+- name: Check results
+  assert:
+    that:
+      - result_1 is success
+      - result_2 is success
+      - result_3 is success
+      - stat_1.stat.exists
+      - stat_2.stat.exists
+      - stat_3.stat.exists
+      - stat_1.stat.size == 9
+      - stat_2.stat.size == 9
+      - stat_3.stat.size == 9
+      - create_2.checksum != stat_2.stat.checksum
+      - create_3.checksum == stat_3.stat.checksum
+
+################################################################################################
+# Cleanup
+
+- name: Remove container
+  docker_container:
+    name: "{{ cname }}"
+    state: absent
+    force_kill: true
