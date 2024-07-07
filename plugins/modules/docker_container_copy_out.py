@@ -56,24 +56,33 @@ options:
       - This flag indicates that filesystem links in the source tree (where the module is executed), if they exist, should be followed.
     type: bool
     default: true
+  archive_mode:
+    description:
+      - This flag indicates that the file should be copied out of the container in archive mode.
+      - If set to V(true), the module will copy the file out of the container in archive mode.
+      - If set to V(false), the module will copy the file out of the container in regular mode.
+      - If this option is not specified, the module will default to V(false).
+    type: bool
+    default: false
   owner_id:
     description:
       - The owner ID to use when writing the file to disk.
-      - If provided, O(group_id) must also be provided.
       - If not provided, the module will default to the current user's UID.
     type: int
   group_id:
     description:
       - The group ID to use when writing the file to disk.
-      - If provided, O(owner_id) must also be provided.
       - If not provided, the module defaults to the current user's GID.
     type: int
   mode:
     description:
       - The file mode to use when writing the file to disk.
-      - Please note that the mode is always interpreted as an octal number.
-      - If not provided, the module will default to 0o644.
-    type: int
+      - For those used to /usr/bin/chmod remember that modes are actually octal numbers.
+      - You must give Ansible enough information to parse them correctly.
+      - For consistent results, quote octal numbers (for example, '644' or '1777') so Ansible receives a string and can do its own conversion from string into number.
+      - Adding a leading zero (for example, 0755) works sometimes, but can fail in loops and some other circumstances.
+      - Giving Ansible a number without following either of these rules will end up with a decimal number which will have unexpected results.
+    type: any
   force:
     description:
       - If set to V(true), force writing the file (without performing any idempotency checks).
@@ -90,7 +99,7 @@ extends_documentation_fragment:
   - community.docker.attributes.actiongroup_docker
 
 author:
-  - "Felix Fontein (@felixfontein)"
+  - "Andrew Dawes (@AndrewJDawes)"
 
 requirements:
   - "Docker API >= 1.25"
@@ -411,6 +420,7 @@ def copy_dst_to_src(diff):
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
+    return container_path, mode, False
     # Resolve symlinks in the container (if requested), and get information on container's file
     real_container_path, regular_stat, link_target = stat_file(
         client,
@@ -557,7 +567,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         follow_links=follow_links,
     )
 
-def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links,
+def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
                              owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     if diff:
         diff = {}
@@ -588,23 +598,15 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             managed_path,
             follow_links=follow_links,
         )
-        # Change the file mode, owner, and group
-        os.chmod(managed_path, mode)
-        os.chown(managed_path, owner_id, group_id)
-
-    # TODO: Calculate and return checksums of the file. If check mode, use the src file to calculate the checksums. Else, use the dest file.
-    # md5sum = None
-    # checksum = None
-    # if os.path.isfile(src):
-    #     try:
-    #         checksum = client.module.sha1(src)
-    #     except (OSError, IOError) as e:
-    #         client.module.warn("Unable to calculate src checksum, assuming change: %s" % to_native(e))
-    #     try:
-    #         # Backwards compat only.  This will be None in FIPS mode
-    #         md5sum = client.module.md5(src)
-    #     except ValueError:
-    #         pass
+        if mode is not None:
+            # Change the file mode, owner, and group
+            os.chmod(managed_path, mode)
+        if owner_id is not None:
+            # Get current group_id
+            os.chown(managed_path, owner_id, os.stat(managed_path).st_gid)
+        if group_id is not None:
+            # Get current owner_id
+            os.chown(managed_path, os.stat(managed_path).st_uid, group_id)
 
     result = dict(
         changed=changed,
@@ -625,11 +627,11 @@ def main():
         container_path=dict(type='str', required=True),
         follow=dict(type='bool', default=False),
         local_follow=dict(type='bool', default=True),
+        archive_mode=dict(type='bool', default=False),
         owner_id=dict(type='int'),
         group_id=dict(type='int'),
-        mode=dict(type='int'),
+        mode=dict(type='str'),
         force=dict(type='bool'),
-
         # Undocumented parameters for use by the action plugin
         _max_file_size_for_diff=dict(type='int'),
     )
@@ -646,6 +648,7 @@ def main():
     container_path = client.module.params['container_path']
     follow = client.module.params['follow']
     local_follow = client.module.params['local_follow']
+    archive_mode = client.module.params['archive_mode']
     owner_id = client.module.params['owner_id']
     group_id = client.module.params['group_id']
     mode = client.module.params['mode']
@@ -656,14 +659,10 @@ def main():
         container_path = os.path.join(os.path.sep, container_path)
     container_path = os.path.normpath(container_path)
 
-    if mode is None:
-        mode = 0o644
-
-    if group_id is None:
-        group_id = os.getgid()
-
-    if owner_id is None:
-        owner_id = os.getuid()
+    if mode is not None:
+        mode = int(mode, 8)
+        if mode != stat.S_IMODE(mode):
+            client.fail('Invalid mode: {0}'.format(mode))
 
     try:
         # TODO: Use fetch_file() method from plugins/module_utils/copy.py
@@ -674,6 +673,7 @@ def main():
             container_path,
             follow_links=follow,
             local_follow_links=local_follow,
+            archive_mode=archive_mode,
             owner_id=owner_id,
             group_id=group_id,
             mode=mode,
