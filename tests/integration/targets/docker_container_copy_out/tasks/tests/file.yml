@@ -50,6 +50,23 @@
 ################################################################################################
 # Do tests
 
+######################### Invalid params
+
+- name: Test invalid mode
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_1
+    path: "{{ remote_tmp_dir }}/file_1"
+    mode: 1234123412341431241
+  register: result_invalid_mode
+  ignore_errors: true
+
+- name: Check results
+  assert:
+    that:
+      - result_invalid_mode is failed
+      - result_invalid_mode.msg == "\"1234123412341431241\" is not a valid mode"
+
 ######################### Copy
 
 - name: Copy file 1
@@ -72,6 +89,7 @@
     container_path: /test/container/path/file_3
     path: "{{ remote_tmp_dir }}/file_3"
   register: result_3
+
 
 - name: Stat file 1
   stat:
