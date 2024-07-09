@@ -620,6 +620,21 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         result['diff'] = diff
     client.module.exit_json(**result)
 
+def mode_to_int_literal(mode):
+    return_mode = None
+    if mode is None:
+        return return_mode
+    try:
+        return_mode = int(str(mode), 8)
+    except ValueError:
+        raise ValueError('"{0}" is not a valid mode'.format(mode))
+    try:
+        if return_mode != stat.S_IMODE(return_mode):
+            raise ValueError('"{0}" is not a valid mode'.format(mode))
+    except OverflowError:
+        raise ValueError('"{0}" is not a valid mode'.format(mode))
+    return return_mode
+
 def main():
     argument_spec = dict(
         container=dict(type='str', required=True),
@@ -659,10 +674,10 @@ def main():
         container_path = os.path.join(os.path.sep, container_path)
     container_path = os.path.normpath(container_path)
 
-    if mode is not None:
-        mode = int(mode, 8)
-        if mode != stat.S_IMODE(mode):
-            client.fail('Invalid mode: {0}'.format(mode))
+    try:
+        mode = mode_to_int_literal(mode)
+    except ValueError as exc:
+        client.fail(to_native(exc))
 
     try:
         # TODO: Use fetch_file() method from plugins/module_utils/copy.py
