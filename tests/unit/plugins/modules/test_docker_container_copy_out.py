@@ -9,7 +9,7 @@ __metaclass__ = type
 
 import pytest
 
-from ansible_collections.community.docker.plugins.modules.docker_container_copy_out import mode_to_int_literal
+from ansible_collections.community.docker.plugins.modules.docker_container_copy_out import mode_to_int_literal, normalize_container_path_to_abspath
 
 
 @pytest.mark.parametrize("mode,expected", [
@@ -92,3 +92,25 @@ def test_mode_to_int_literal_negatives(mode):
     with pytest.raises(ValueError) as e:
         mode_to_int_literal(mode)
     assert '"{0}" is not a valid mode'.format(mode) == str(e.value)
+
+@pytest.mark.parametrize("path,expected", [
+    ('', '/'),
+    ('tmp', '/tmp'),
+    ('tmp/test', '/tmp/test'),
+    ('tmp/../test', '/test'),
+    ('tmp/../../test', '/test'),
+    ('/tmp//test', '/tmp/test'),
+    ('//tmp/test', '//tmp/test'), # this is the behavior of os.path.normpath
+    ('tmp//test//', '/tmp/test'),
+])
+def test_normalize_container_path_to_abspath_positives(path, expected):
+    assert normalize_container_path_to_abspath(path) == expected
+
+@pytest.mark.parametrize("path", [
+    (123),
+    ([1, 2, 3]),
+])
+def test_normalize_container_path_to_abspath_negatives(path):
+    with pytest.raises(ValueError) as e:
+        normalize_container_path_to_abspath(path)
+    assert 'Path "{0}" is not a valid path'.format(path) == str(e.value)

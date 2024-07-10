@@ -635,6 +635,14 @@ def mode_to_int_literal(mode):
         raise ValueError('"{0}" is not a valid mode'.format(mode))
     return return_mode
 
+def normalize_container_path_to_abspath(path):
+    if not isinstance(path, str):
+        raise ValueError('Path "{0}" is not a valid path'.format(path))
+    if not path.startswith(os.path.sep):
+        path = os.path.join(os.path.sep, path)
+    path = os.path.normpath(path)
+    return path
+
 def main():
     argument_spec = dict(
         container=dict(type='str', required=True),
@@ -670,9 +678,10 @@ def main():
     force = client.module.params['force']
     max_file_size_for_diff = client.module.params['_max_file_size_for_diff'] or 1
 
-    if not container_path.startswith(os.path.sep):
-        container_path = os.path.join(os.path.sep, container_path)
-    container_path = os.path.normpath(container_path)
+    try:
+        container_path = normalize_container_path_to_abspath(container_path)
+    except ValueError as exc:
+        client.fail(to_native(exc))
 
     try:
         mode = mode_to_int_literal(mode)
