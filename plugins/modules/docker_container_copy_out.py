@@ -417,7 +417,7 @@ def copy_dst_to_src(diff):
             diff.pop(t)
 
 
-def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, owner_id, group_id, mode,
+def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
     return container_path, mode, False
@@ -581,6 +581,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         container_path,
         follow_links,
         local_follow_links,
+        archive_mode,
         owner_id,
         group_id,
         mode,
