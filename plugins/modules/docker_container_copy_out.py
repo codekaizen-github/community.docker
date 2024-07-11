@@ -421,6 +421,18 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
                        force=False, diff=None, max_file_size_for_diff=1):
 
     return container_path, mode, False
+
+    # TODO - get some basic stat data about the file in the container so we can
+    # 1. Throw an error if container file doesn't exist
+    # 1. Check if managed node file exists
+    # 1. If local_follow_links,then we are worried about keeping any existing managed node symlink as a symlink (if managed node file already exists and is a symlink) then we need to resolve that symlink.
+    # 1. If follow_links, then we are worried about keeping any existing container symlink follow_links as a symlink (if container file is a symlink) then we need to resolve that symlink.
+    # 1. If forcing == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
+    # 1. If forcing == False, check to see if a file already exists on managed node. If it does, we are "idempotent" (we will make no changes). Else, we will make changes because we are "not idempotent" (file needs to exist!). Shouldn't we provide the diff if asked for? But will not be changed.
+    # 1. If forcing == None, then we need to diff the files to see if they are the same to determine idempotence.
+    # 1. If they are the same, then we can skip the copy.
+    # 1. If they are different, then we need to copy the file from the container to the managed node.
+
     # Resolve symlinks in the container (if requested), and get information on container's file
     real_container_path, regular_stat, link_target = stat_file(
         client,
