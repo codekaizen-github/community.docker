@@ -198,6 +198,66 @@ def put_file_content(client, container, content, out_path, user_id, group_id, mo
     if not ok:
         raise DockerUnexpectedError('Unknown error while creating file "{0}" in container "{1}".'.format(out_path, container))
 
+def stat_data_mode_is_symlink(mode):
+    """
+    :param mode: Mode of a file in a container
+    :type mode: int
+    :returns: True if the file is a symlink, False otherwise
+    :rtype bool
+    """
+    return mode & (1 << (32 - 5)) != 0
+
+def stat_file_ex(client, container, in_path):
+    """Fetch information on a file from a Docker container.
+
+    :param client: Docker client
+    :type client: APIClient
+    :param container: Container ID
+    :type container: str
+    :param in_path: Path to the file in the container
+    :type in_path: str
+    :returns A dictionary with fields ``name`` (string), ``size`` (integer), ``mode`` (integer, see https://pkg.go.dev/io/fs#FileMode),
+    :rtype: dict
+    :raises DockerFileNotFound: If the file does not exist in the container
+    :raises DockerUnexpectedError: If the header cannot be loaded as JSON
+    """
+    response = client._head(
+        client._url('/containers/{0}/archive', container),
+        params={'path': in_path},
+    )
+    if response.status_code == 404:
+        raise DockerFileNotFound(
+            'File {in_path} does not exist in container {container}'
+            .format(in_path=in_path, container=container)
+        )
+    client._raise_for_status(response)
+    header = response.headers.get('x-docker-container-path-stat')
+    try:
+        stat_data = json.loads(base64.b64decode(header))
+    except Exception as exc:
+        raise DockerUnexpectedError(
+            'When retrieving information for {in_path} from {container}, obtained header {header!r} that cannot be loaded as JSON: {exc}'
+            .format(in_path=in_path, container=container, header=header, exc=exc)
+        )
+    return stat_data
+
+def stat_file_resolve_symlinks(client, container, in_path):
+    """Get stat data for a file in a container, resolving symlinks.
+    :param client: Docker client
+    :type client: APIClient
+    :param container: Container ID
+    :type container: str
+    :param in_path: Path to the file in the container
+    :type in_path: str
+    :returns A dictionary with fields ``name`` (string), ``size`` (integer), ``mode`` (integer, see https://pkg.go.dev/io/fs#FileMode),
+    :rtype: dict
+    :raises DockerFileNotFound: If the file does not exist in the container
+    :raises DockerUnexpectedError: If the header cannot be loaded as JSON
+    """
+    stat_data = stat_file_ex(client, container, in_path)
+    if stat_data_mode_is_symlink(stat_data['mode']):
+        return stat_file_resolve_symlinks(client, container, stat_data['linkTarget'])
+    return stat_data
 
 def stat_file(client, container, in_path, follow_links=False, log=None):
     """Fetch information on a file from a Docker container to local.
@@ -221,24 +281,13 @@ def stat_file(client, container, in_path, follow_links=False, log=None):
         if log:
             log('FETCH: Stating "%s"' % in_path)
 
-        response = client._head(
-            client._url('/containers/{0}/archive', container),
-            params={'path': in_path},
-        )
-        if response.status_code == 404:
-            return in_path, None, None
-        client._raise_for_status(response)
-        header = response.headers.get('x-docker-container-path-stat')
         try:
-            stat_data = json.loads(base64.b64decode(header))
-        except Exception as exc:
-            raise DockerUnexpectedError(
-                'When retrieving information for {in_path} from {container}, obtained header {header!r} that cannot be loaded as JSON: {exc}'
-                .format(in_path=in_path, container=container, header=header, exc=exc)
-            )
+            stat_data = stat_file_ex(client, container, in_path)
+        except DockerFileNotFound:
+            return in_path, None, None
 
         # https://pkg.go.dev/io/fs#FileMode: bit 32 - 5 means ModeSymlink
-        if stat_data['mode'] & (1 << (32 - 5)) != 0:
+        if stat_data_mode_is_symlink(stat_data['mode']):
             link_target = stat_data['linkTarget']
             if not follow_links:
                 return in_path, stat_data, link_target
