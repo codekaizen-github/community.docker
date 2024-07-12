@@ -175,6 +175,8 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
     fetch_file,
     fetch_file_ex,
     stat_file,
+    stat_file_ex,
+    stat_file_resolve_symlinks,
 )
 
 from ansible_collections.community.docker.plugins.module_utils._scramble import generate_insecure_key, scramble
@@ -417,21 +419,78 @@ def copy_dst_to_src(diff):
             diff.pop(t)
 
 
+def stat_container_file(client, container, in_path):
+    return stat_file_ex(
+        client,
+        container,
+        in_path
+    )
+
+def stat_container_file_resolve_symlinks(client, container, in_path):
+    return stat_file_resolve_symlinks(client, container, in_path)
+
+
+def stat_managed_file(managed_path):
+    try:
+        return os.stat(managed_path)
+    except OSError as exc:
+        # If the file doesn't exist, we can't compare it
+        if exc.errno == 2:
+            raise FileNotFoundError('File {0} does not exist'.format(managed_path))
+        raise
+
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
     return container_path, mode, False
 
-    # TODO - get some basic stat data about the file in the container so we can
-    # 1. Throw an error if container file doesn't exist
-    # 1. Check if managed node file exists
-    # 1. If local_follow_links,then we are worried about keeping any existing managed node symlink as a symlink (if managed node file already exists and is a symlink) then we need to resolve that symlink.
-    # 1. If follow_links, then we are worried about keeping any existing container symlink follow_links as a symlink (if container file is a symlink) then we need to resolve that symlink.
+    # TODO - get some basic stat data about the file in the container so we can check idempotence.
+    # Throws an error if container file doesn't exist
+    regular_stat = None
+    regular_stat = stat_container_file(
+        client,
+        container,
+        in_path=container_path,
+    )
+
+    # Stat the local file
+    file_stat = None
+    try:
+        file_stat = stat_managed_file(managed_path)
+    except FileNotFoundError:
+        pass
+
+    # If follow_links, then we want to get the real path of the file in the container
+    real_stat = None
+    if follow_links:
+        try:
+            real_stat = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
+        except DockerFileNotFound:
+            pass
+
     # 1. If forcing == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
     # 1. If forcing == False, check to see if a file already exists on managed node. If it does, we are "idempotent" (we will make no changes). Else, we will make changes because we are "not idempotent" (file needs to exist!). Shouldn't we provide the diff if asked for? But will not be changed.
     # 1. If forcing == None, then we need to diff the files to see if they are the same to determine idempotence.
     # 1. If they are the same, then we can skip the copy.
     # 1. If they are different, then we need to copy the file from the container to the managed node.
+
+
+    # Calculate the diff "after" if requested
+    # if diff is not None:
+    #     if file_stat.st_size > max_file_size_for_diff > 0:
+    #         diff['src_larger'] = max_file_size_for_diff
+    #     elif stat.S_ISLNK(file_stat.st_mode):
+    #         diff['after_header'] = managed_path
+    #         diff['after'] = os.readlink(managed_path)
+    #     else:
+    #         with open(managed_path, 'rb') as f:
+    #             content = f.read()
+    #         if is_binary(content):
+    #             diff['src_binary'] = 1
+    #         else:
+    #             diff['after_header'] = managed_path
+    #             diff['after'] = to_text(content)
+    # Retrieve information of local file
 
     # Resolve symlinks in the container (if requested), and get information on container's file
     real_container_path, regular_stat, link_target = stat_file(
