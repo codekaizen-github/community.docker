@@ -475,7 +475,6 @@ def container_stat_data_mode_is_symlink(mode):
 def managed_stat_data_mode_is_symlink(mode):
     return stat.S_ISLNK(mode)
 
-
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
@@ -504,7 +503,6 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
     dst_stat_follow_links = None
     if local_follow_links:
         dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-
     log(client.module, f'src_stat: {src_stat} | dst_stat: {dst_stat} | src_stat_follow_links: {src_stat_follow_links} | dst_stat_follow_links: {dst_stat_follow_links}')
     # 1. If force == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
     if force == True:
@@ -515,23 +513,38 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         if dst_stat is not None:
             return True
     # 1. If forcing == None (default), then we need to diff the files to see if they are the same to determine idempotence.
+    src_is_symlink = container_stat_data_mode_is_symlink(src_stat['mode'])
+    dst_is_symlink = managed_stat_data_mode_is_symlink(dst_stat.st_mode)
     # Are either of the files symlinks?
-    if container_stat_data_mode_is_symlink(src_stat['mode']) or managed_stat_data_mode_is_symlink(dst_stat.st_mode):
-        pass
-    return False
-        # Are either treated as symlinks (no follow)?
-            # Are they BOTH treated as symlinks? If not, then not idempotent
-                # src_is_symlink = (src_mode == symlink AND not follow_links)
-                # dst_is_symlink  = (dst_mode == symlink AND not local_follow_links)
-                # if src_is_symlink != dst_is_symlink return False
+    if src_is_symlink or dst_is_symlink:
+        # Are they treated as symlinks?
+        src_is_treated_as_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and not follow_links)
+        dst_is_treated_as_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and not local_follow_links)
+        # Is one treated as a symlink and the other not? Then not idempotent.
+        if src_is_treated_as_symlink != dst_is_treated_as_symlink:
+            return False
+        # Both are treated as symlinks
+        if src_is_treated_as_symlink and dst_is_treated_as_symlink:
             # OK, so they're both treated as symlinks... Do they:
-                # Point to the same target?
-                # Standard checks on stat
-                    # Have the same file type (obviously)
-                    # Have the same UID, GID
-                    # Have the same mode?
-                    # If type is dir, perform recursive. (won't apply)
-                    # etc.
+            # Point to the same target?
+            src_symlink_target = src_stat['linkTarget']
+            dst_symlink_target = os.readlink(managed_path)
+            if src_symlink_target != dst_symlink_target:
+                return False
+            # Standard checks on stat
+            # Have the same file type (obviously)
+            # TODO figure out how to get the file type for src: https://docs.docker.com/engine/api/v1.24/#31-containers
+            # Get the leftmost 12 bits of the mode
+            src_file_type = src_stat['mode'] & 0xFFF
+            # TODO figure out how to get the file type for dst: https://docs.python.org/3/library/os.html#os.stat
+            dst_file_type = stat.S_IFMT(dst_stat.st_mode)
+            if src_file_type != dst_file_type:
+                return False
+
+                # Have the same UID, GID
+                # Have the same mode?
+                # If type is dir, perform recursive. (won't apply)
+                # etc.
         # Neither is treated as a symlink? (following both)
             # Compare the targets
                 # Standard checks on stat
@@ -541,6 +554,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
                     # If type is dir, perform recursive.
                     # etc.
                 # Standard checks on content (recursive if dir)
+    return False
     # Neither file is a symlink
         # Compare the files
             # Standard checks on stat
