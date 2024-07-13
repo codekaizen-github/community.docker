@@ -234,6 +234,8 @@ def stat_file_ex(client, container, in_path):
     header = response.headers.get('x-docker-container-path-stat')
     try:
         stat_data = json.loads(base64.b64decode(header))
+        if not isinstance(stat_data, dict):
+            raise ValueError('Not a dictionary')
     except Exception as exc:
         raise DockerUnexpectedError(
             'When retrieving information for {in_path} from {container}, obtained header {header!r} that cannot be loaded as JSON: {exc}'
