@@ -174,6 +174,7 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
     DockerUnexpectedError,
     fetch_file,
     fetch_file_ex,
+    stat_data_mode_is_symlink,
     stat_file,
     stat_file_ex,
     stat_file_resolve_symlinks,
@@ -181,6 +182,13 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
 
 from ansible_collections.community.docker.plugins.module_utils._scramble import generate_insecure_key, scramble
 
+import datetime
+
+def log(module, msg):
+    # Get a timestamp
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamped_msg = f'{timestamp}: docker_container_copy_out: {msg}'
+    module.log(timestamped_msg)
 
 def are_fileobjs_equal(f1, f2):
     '''Given two (buffered) file objects, compare their contents.'''
@@ -420,57 +428,133 @@ def copy_dst_to_src(diff):
 
 
 def stat_container_file(client, container, in_path):
-    return stat_file_ex(
+    """Fetch information on a file from a Docker container.
+
+    :param client: Docker client
+    :type client: APIClient
+    :param container: Container ID
+    :type container: str
+    :param in_path: Path to the file in the container
+    :type in_path: str
+    :returns A dictionary with fields ``name`` (string), ``size`` (integer), ``mode`` (integer, see https://pkg.go.dev/io/fs#FileMode),
+    :rtype: dict
+    :raises DockerFileNotFound: If the file does not exist in the container
+    :raises DockerUnexpectedError: If the header cannot be loaded as JSON
+    """
+    # Example response: https://docs.docker.com/engine/api/v1.24/#retrieving-information-about-files-and-folders-in-a-container
+    # {
+    # "name": "root",
+    # "size": 4096,
+    # "mode": 2147484096,
+    # "mtime": "2014-02-27T20:51:23Z",
+    # "linkTarget": ""
+    # }
+    stat_data = stat_file_ex(
         client,
         container,
         in_path
     )
+    # Assert that size, mode, and linkTarget are present
+    for key in ('size', 'mode', 'linkTarget'):
+        if key not in stat_data:
+            raise DockerUnexpectedError('File stat data is missing key "{0}"'.format(key))
+    return stat_data
+
+def stat_managed_file(managed_path):
+    return os.lstat(managed_path)
 
 def stat_container_file_resolve_symlinks(client, container, in_path):
     return stat_file_resolve_symlinks(client, container, in_path)
 
+def stat_managed_file_resolve_symlinks(managed_path):
+    return os.stat(managed_path)
 
-def stat_managed_file(managed_path):
-    try:
-        return os.stat(managed_path)
-    except OSError as exc:
-        # If the file doesn't exist, we can't compare it
-        if exc.errno == 2:
-            raise FileNotFoundError('File {0} does not exist'.format(managed_path))
-        raise
+def container_stat_data_mode_is_symlink(mode):
+    return stat_data_mode_is_symlink(mode)
+
+def managed_stat_data_mode_is_symlink(mode):
+    return stat.S_ISLNK(mode)
+
 
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
-    return container_path, mode, False
+    # return container_path, mode, False
 
     # TODO - get some basic stat data about the file in the container so we can check idempotence.
     # Throws an error if container file doesn't exist
-    regular_stat = None
-    regular_stat = stat_container_file(
+    src_stat = stat_container_file(
         client,
         container,
         in_path=container_path,
     )
 
+    # If follow_links, then we want to get the real path of the file in the container
+    src_stat_follow_links = None
+    if follow_links:
+        # Will throw error if file does not exist
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
     # Stat the local file
-    file_stat = None
+    dst_stat = None
     try:
-        file_stat = stat_managed_file(managed_path)
+        dst_stat = stat_managed_file(managed_path)
     except FileNotFoundError:
         pass
+    # If follow_links, then we want to get the real path of the file on managed node
+    dst_stat_follow_links = None
+    if local_follow_links:
+        dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
 
-    # If follow_links, then we want to get the real path of the file in the container
-    real_stat = None
-    if follow_links:
-        try:
-            real_stat = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
-        except DockerFileNotFound:
-            pass
+    log(client.module, f'src_stat: {src_stat} | dst_stat: {dst_stat} | src_stat_follow_links: {src_stat_follow_links} | dst_stat_follow_links: {dst_stat_follow_links}')
+    # 1. If force == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
+    if force == True:
+        return False
 
-    # 1. If forcing == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
-    # 1. If forcing == False, check to see if a file already exists on managed node. If it does, we are "idempotent" (we will make no changes). Else, we will make changes because we are "not idempotent" (file needs to exist!). Shouldn't we provide the diff if asked for? But will not be changed.
-    # 1. If forcing == None, then we need to diff the files to see if they are the same to determine idempotence.
+    # 1. If force == False, check to see if a file already exists on managed node. If it does, we are "idempotent" (we will make no changes). Else, we will make changes because we are "not idempotent" (file needs to exist!). Shouldn't we provide the diff if asked for? But will not be changed.
+    if force == False:
+        if dst_stat is not None:
+            return True
+    # 1. If forcing == None (default), then we need to diff the files to see if they are the same to determine idempotence.
+    # Are either of the files symlinks?
+    if container_stat_data_mode_is_symlink(src_stat['mode']) or managed_stat_data_mode_is_symlink(dst_stat.st_mode):
+        pass
+    return False
+        # Are either treated as symlinks (no follow)?
+            # Are they BOTH treated as symlinks? If not, then not idempotent
+                # src_is_symlink = (src_mode == symlink AND not follow_links)
+                # dst_is_symlink  = (dst_mode == symlink AND not local_follow_links)
+                # if src_is_symlink != dst_is_symlink return False
+            # OK, so they're both treated as symlinks... Do they:
+                # Point to the same target?
+                # Standard checks on stat
+                    # Have the same file type (obviously)
+                    # Have the same UID, GID
+                    # Have the same mode?
+                    # If type is dir, perform recursive. (won't apply)
+                    # etc.
+        # Neither is treated as a symlink? (following both)
+            # Compare the targets
+                # Standard checks on stat
+                    # Have the same file type
+                    # Have the same UID, GID
+                    # Have the same mode?
+                    # If type is dir, perform recursive.
+                    # etc.
+                # Standard checks on content (recursive if dir)
+    # Neither file is a symlink
+        # Compare the files
+            # Standard checks on stat
+                # Have the same file type
+                # Have the same UID, GID
+                # Have the same mode?
+                # If type is dir, perform recursive.
+                # etc.
+            # Standard checks on content (recursive if dir)
+
+
+    # Are the files the same type (mode)?
+
+
     # 1. If they are the same, then we can skip the copy.
     # 1. If they are different, then we need to copy the file from the container to the managed node.
 
@@ -645,7 +729,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
     else:
         diff = None
 
-    container_path, mode, idempotent = is_file_idempotent(
+    idempotent = is_file_idempotent(
         client,
         container,
         managed_path,
