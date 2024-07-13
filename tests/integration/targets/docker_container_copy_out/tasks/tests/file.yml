@@ -23,6 +23,14 @@
         echo -n "Content 1" > /test/container/path/file_1;
         echo -n "Content 2" > /test/container/path/file_2;
         echo -n "Content 3" > /test/container/path/file_3;
+        mkdir -p /test/container/path/testdir
+        echo -n "Content 4" > /test/container/path/testdir/file_4;
+        mkdir -p /test/container/path/testdir/nested
+        echo -n "Content 5" > /test/container/path/testdir/nested/file_5;
+        ln -nfs /test/container/path/testdir /test/container/path/lndir
+        ln -nfs /test/container/path/file_1 /test/container/path/lnfile
+        ln -nfs /test/container/path/lndir /test/container/path/lndir2
+        ln -nfs /test/container/path/lndir/file_4 /test/container/path/lnfile2
         sleep 10m;
     name: "{{ cname }}"
     state: started
@@ -46,6 +54,68 @@
     content: Content 3
     mode: 0644
   register: create_3
+
+# Create a directory
+- name: Create directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir"
+    state: directory
+
+# Create a nested directory
+- name: Create nested directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir/nested"
+    state: directory
+
+# Create a different directory
+- name: Create different directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir2"
+    state: directory
+
+# Create a file in a directory
+- name: Create file in directory
+  copy:
+    dest: "{{ remote_tmp_dir }}/testdir2/file_4"
+    content: Content 4
+    mode: 0644
+
+# Create a symlink to a directory
+- name: Create symlink to directory
+  file:
+    src: "{{ remote_tmp_dir }}/testdir"
+    dest: "{{ remote_tmp_dir }}/lndir"
+    state: link
+
+# Create a symlink to a file
+- name: Create symlink to file
+  file:
+    src: "{{ remote_tmp_dir }}/file_2"
+    dest: "{{ remote_tmp_dir }}/lnfile"
+    state: link
+
+# Create a broken symlink
+- name: Create broken symlink
+  file:
+    src: "{{ remote_tmp_dir }}/nonexistent"
+    dest: "{{ remote_tmp_dir }}/broken"
+    state: link
+    force: True
+
+# Create a symlink to a symlink
+- name: Create symlink to symlink
+  file:
+    src: "{{ remote_tmp_dir }}/lndir"
+    dest: "{{ remote_tmp_dir }}/lndir2"
+    state: link
+
+# Create a symlink to a file in a symlinked directory
+# - name: Create symlink to file in symlinked directory
+#   file:
+#     src: "{{ remote_tmp_dir }}/lndir/file_4"
+#     dest: "{{ remote_tmp_dir }}/lnfile2"
+#     state: link
+#     follow: True
 
 ################################################################################################
 # Do tests
@@ -90,6 +160,47 @@
     path: "{{ remote_tmp_dir }}/file_3"
   register: result_3
 
+- name: Copy directory with nesting to a directory with nesting that already exists
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir
+    path: "{{ remote_tmp_dir }}/testdir"
+  register: result_dir_nesting_exists
+
+- name: Copy directory that only contains a file to a directory that already exists and only contains a file
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir/nested
+    path: "{{ remote_tmp_dir }}/testdir/nested"
+  register: result_dir_only_file_exists
+
+- name: Copy directory with nesting to a directory that already exists and only contains a file
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir
+    path: "{{ remote_tmp_dir }}/testdir2"
+  register: result_dir_nesting_file_exists_but_different
+
+- name: Copy symlink to directory
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/lndir
+    path: "{{ remote_tmp_dir }}/lndir"
+  register: result_lndir
+
+- name: Copy symlink to file
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/lnfile
+    path: "{{ remote_tmp_dir }}/lnfile"
+  register: result_lnfile
+
+- name: Copy symlink to symlink
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/lndir2
+    path: "{{ remote_tmp_dir }}/lndir2"
+  register: result_lndir2
 
 - name: Stat file 1
   stat:
@@ -106,6 +217,31 @@
     path: "{{ remote_tmp_dir }}/file_3"
   register: stat_3
 
+- name: Stat directory
+  stat:
+    path: "{{ remote_tmp_dir }}/testdir"
+  register: stat_dir
+
+- name: Stat nested directory
+  stat:
+    path: "{{ remote_tmp_dir }}/testdir/nested"
+  register: stat_nested_dir
+
+- name: Stat symlink to directory
+  stat:
+    path: "{{ remote_tmp_dir }}/lndir"
+  register: stat_lndir
+
+- name: Stat symlink to file
+  stat:
+    path: "{{ remote_tmp_dir }}/lnfile"
+  register: stat_lnfile
+
+- name: Stat symlink to symlink
+  stat:
+    path: "{{ remote_tmp_dir }}/lndir2"
+  register: stat_lndir2
+
 - name: Check results
   assert:
     that:
@@ -120,6 +256,21 @@
       - stat_3.stat.size == 9
       - create_2.checksum != stat_2.stat.checksum
       - create_3.checksum == stat_3.stat.checksum
+      - result_dir_nesting_exists is success
+      - result_dir_only_file_exists is success
+      - result_lndir is success
+      - result_lnfile is success
+      - result_lndir2 is success
+      - stat_dir.stat.exists
+      - stat_nested_dir.stat.exists
+      - stat_lndir.stat.exists
+      - stat_lnfile.stat.exists
+      - stat_lndir2.stat.exists
+      - stat_dir.stat.islnk == false
+      - stat_nested_dir.stat.islnk == false
+      - stat_lndir.stat.islnk
+      - stat_lnfile.stat.islnk
+      - stat_lndir2.stat.islnk
 
 ################################################################################################
 # Cleanup
