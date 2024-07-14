@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from __future__ import absolute_import, division, print_function
+import tarfile
 __metaclass__ = type
 
 
@@ -48,12 +49,16 @@ options:
     required: true
   follow:
     description:
-      - This flag indicates that filesystem links in the Docker container, if they exist, should be followed.
+      - This flag indicates that if O(container_path) is a symlink in the container, it should be followed.
+      - Note that if O(container_path) is a directory or a symlink to a directory, this does not apply recursively.
+      - In this way, behavior is similar to C(docker cp).
     type: bool
     default: false
   local_follow:
     description:
-      - This flag indicates that filesystem links in the source tree (where the module is executed), if they exist, should be followed.
+      - That flag indicates that if O(path) is a symlink on the managed filesystem, it should be followed.
+      - Note that if O(managed_path) is a directory or a symlink to a directory, this does not apply recursively.
+      - In this way, behavior is similar to C(docker cp).
     type: bool
     default: true
   archive_mode:
@@ -64,15 +69,18 @@ options:
       - If this option is not specified, the module will default to V(false).
     type: bool
     default: false
+    notes:
+        - By default, files copied to the local machine are created with the UID:GID of the user which invoked command.
+        - However, if you specify C(true) for O(archive_mode), this attempts to set the ownership to the user and primary group at the source.
   owner_id:
     description:
       - The owner ID to use when writing the file to disk.
-      - If not provided, the module will default to the current user's UID.
+      - If not provided, the module will default to the current user's UID, unless O(archive_mode) is C(true).
     type: int
   group_id:
     description:
       - The group ID to use when writing the file to disk.
-      - If not provided, the module defaults to the current user's GID.
+      - If not provided, the module will default to the current user's GID, unless O(archive_mode) is C(true).
     type: int
   mode:
     description:
@@ -172,6 +180,7 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
     DockerFileCopyError,
     DockerFileNotFound,
     DockerUnexpectedError,
+    _stream_generator_to_fileobj,
     fetch_file,
     fetch_file_ex,
     stat_data_mode_is_symlink,
@@ -475,9 +484,73 @@ def container_stat_data_mode_is_symlink(mode):
 def managed_stat_data_mode_is_symlink(mode):
     return stat.S_ISLNK(mode)
 
-def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+
+def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
+    # Stat the container file (needed to determine if symlink and should follow)
+    # Throws an error if container file doesn't exist
+    src_stat = stat_container_file(
+        client,
+        container,
+        in_path=container_path,
+    )
+    src_is_followed_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
+    # Stat the local file
+    dst_stat = None
+    try:
+        dst_stat = stat_managed_file(managed_path)
+    except FileNotFoundError:
+        pass
+    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
+    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
+    # If follow_links, then we want to get the real path of the file in the container
+    src_stat_follow_links = None
+    if src_is_followed_symlink:
+        # Will throw error if file does not exist
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
+    # If follow_links, then we want to get the real path of the file on managed node
+    dst_stat_follow_links = None
+    if dst_is_followed_symlink:
+        dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+
+    # Get the tar content of container_path
+    try:
+        stream = client.get_raw_stream(
+            '/containers/{0}/archive'.format(container),
+            params={'path': src_path},
+            headers={'Accept-Encoding': 'identity'},
+        )
+    except NotFound:
+        raise DockerFileNotFound('File {0} does not exist in container {1}'.format(src_path, container))
+
+    with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
+        # Foreach member
+        for member in tar:
+            log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
+            # Derive path that file will be written to when expanded
+            dst_member_path = os.path.join(dst_path, member.path)
+            # Stat the managed path
+            dst_member_stat = None
+            try:
+                dst_member_stat = stat_managed_file(dst_member_path)
+            except FileNotFoundError:
+                pass
+            log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
+            # Check force settings first
+            if dst_member_stat is not None and not force:
+                continue
+            tar.extract(member, dst_path)
+            # TODO Set the owner, group, and mode of the file
+            # stat again to confirm
+            dst_member_stat_result = stat_managed_file(dst_member_path)
+            log(client.module, f'Destination member path AFTER: {dst_member_path}, stat: {dst_member_stat_result}')
+
+
+def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+                       force=False, diff=None, max_file_size_for_diff=1):
+    return False
     # return container_path, mode, False
 
     # TODO - get some basic stat data about the file in the container so we can check idempotence.
@@ -533,18 +606,41 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
                 return False
             # Standard checks on stat
             # Have the same file type (obviously)
-            # TODO figure out how to get the file type for src: https://docs.docker.com/engine/api/v1.24/#31-containers
+            # Get the file type for src: https://docs.docker.com/engine/api/v1.24/#31-containers
             # Get the leftmost 12 bits of the mode
             src_file_type = src_stat['mode'] & 0xFFF
-            # TODO figure out how to get the file type for dst: https://docs.python.org/3/library/os.html#os.stat
+            # Get the file type for dst: https://docs.python.org/3/library/os.html#os.stat
             dst_file_type = stat.S_IFMT(dst_stat.st_mode)
             if src_file_type != dst_file_type:
                 return False
-
-                # Have the same UID, GID
-                # Have the same mode?
-                # If type is dir, perform recursive. (won't apply)
-                # etc.
+            # TODO how can we get the UID and GID of the container file? Will we need to fetch tar over the API?
+            try:
+                stream = client.get_raw_stream(
+                    '/containers/{0}/archive', container,
+                    params={'path': container_path},
+                    headers={'Accept-Encoding': 'identity'},
+                )
+            except NotFound:
+                raise DockerFileNotFound('File {0} does not exist in container {1}'.format(container_path, container))
+            with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
+                for member in tar:
+                    # Stat the file on the managed node
+                    try:
+                        managed_member = os.lstat(member.path)
+                    except FileNotFoundError:
+                        return False
+                    # Check things like user/group ID and mode against the managed file
+                    if any([
+                        managed_member.st_mode != member.mode,
+                        managed_member.st_uid != member.uid,
+                        managed_member.st_gid != member.gid,
+                        managed_member.st_size != member.size,
+                    ]):
+                        return False
+                    # Have the same UID, GID
+                    # Have the same mode?
+                    # If type is dir, perform recursive. (won't apply here because type is symlinks)
+                    # etc.
         # Neither is treated as a symlink? (following both)
             # Compare the targets
                 # Standard checks on stat
@@ -742,42 +838,40 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         diff = {}
     else:
         diff = None
-
-    idempotent = is_file_idempotent(
-        client,
-        container,
-        managed_path,
-        container_path,
-        follow_links,
-        local_follow_links,
-        archive_mode,
-        owner_id,
-        group_id,
-        mode,
-        force=force,
-        diff=diff,
-        max_file_size_for_diff=max_file_size_for_diff,
-    )
+    idempotent = False
+    # idempotent = is_file_idempotent(
+    #     client,
+    #     container,
+    #     managed_path,
+    #     container_path,
+    #     follow_links,
+    #     local_follow_links,
+    #     archive_mode,
+    #     owner_id,
+    #     group_id,
+    #     mode,
+    #     force=force,
+    #     diff=diff,
+    #     max_file_size_for_diff=max_file_size_for_diff,
+    # )
     changed = not idempotent
 
     if changed and not client.module.check_mode:
-        fetch_file(
+        copy(
             client,
             container,
-            container_path,
             managed_path,
+            container_path,
             follow_links=follow_links,
+            local_follow_links=local_follow_links,
+            archive_mode=archive_mode,
+            owner_id=owner_id,
+            group_id=group_id,
+            mode=mode,
+            force=force,
+            diff=diff,
+            max_file_size_for_diff=max_file_size_for_diff,
         )
-        if mode is not None:
-            # Change the file mode, owner, and group
-            os.chmod(managed_path, mode)
-        if owner_id is not None:
-            # Get current group_id
-            os.chown(managed_path, owner_id, os.stat(managed_path).st_gid)
-        if group_id is not None:
-            # Get current owner_id
-            os.chown(managed_path, os.stat(managed_path).st_uid, group_id)
-
     result = dict(
         changed=changed,
         container_path=container_path,
