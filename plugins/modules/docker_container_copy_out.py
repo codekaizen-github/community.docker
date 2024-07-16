@@ -525,27 +525,45 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     except NotFound:
         raise DockerFileNotFound('File {0} does not exist in container {1}'.format(src_path, container))
 
+    def tar_filter(member, path):
+        if not isinstance(member, tarfile.TarInfo):
+            raise ValueError('member is not a TarInfo object')
+        log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
+        # Derive path that file will be written to when expanded
+        dst_member_path = os.path.join(dst_path, member.path)
+        # Stat the managed path
+        dst_member_stat = None
+        try:
+            dst_member_stat = stat_managed_file(dst_member_path)
+        except FileNotFoundError:
+            pass
+        log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
+        # Check force settings first
+        if dst_member_stat is not None and not force:
+            return None
+        group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
+        user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
+        member.gid = group_id_to_use
+        member.uid = user_id_to_use
+        log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}')
+        return member
+        # tar.extract(member, dst_path)
+        # TODONE Confirmed that the file is extracted to the correct path and that force is working
+        # TODO Set the owner, group, and mode of the file
+        # TODO owner
+        # TODO group
+        # os.chown(dst_member_path, user_id_to_use, group_id_to_use)
+        # TODO mode
+        # TODO Figure out what tar extract does by default - what perms does it use?
+        # stat again to confirm
+        # dst_member_stat_result = stat_managed_file(dst_member_path)
+        # log(client.module, f'Destination member path AFTER: {dst_member_path}, stat: {dst_member_stat_result}')
+
+
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
         # Foreach member
-        for member in tar:
-            log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
-            # Derive path that file will be written to when expanded
-            dst_member_path = os.path.join(dst_path, member.path)
-            # Stat the managed path
-            dst_member_stat = None
-            try:
-                dst_member_stat = stat_managed_file(dst_member_path)
-            except FileNotFoundError:
-                pass
-            log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
-            # Check force settings first
-            if dst_member_stat is not None and not force:
-                continue
-            tar.extract(member, dst_path)
-            # TODO Set the owner, group, and mode of the file
-            # stat again to confirm
-            dst_member_stat_result = stat_managed_file(dst_member_path)
-            log(client.module, f'Destination member path AFTER: {dst_member_path}, stat: {dst_member_stat_result}')
+        tar.extractall(path=dst_path, numeric_owner=True, filter=tar_filter)
+            
 
 
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
@@ -927,7 +945,9 @@ def main():
         argument_spec=argument_spec,
         min_docker_api_version='1.20',
         supports_check_mode=True,
-        required_together=[('owner_id', 'group_id')],
+        # I don't think we need these to both be supplied at this point
+        # required_together=[('owner_id', 'group_id')],
+        # TODO Make archive_mode and owner_id/group_id mutually exclusive?
     )
 
     container = client.module.params['container']
