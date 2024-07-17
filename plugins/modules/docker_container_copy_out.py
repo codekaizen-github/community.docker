@@ -528,6 +528,7 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     def tar_filter(member, path):
         if not isinstance(member, tarfile.TarInfo):
             raise ValueError('member is not a TarInfo object')
+        # TODO If check mode, return None so that the file is not extracted
         log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
         # Derive path that file will be written to when expanded
         dst_member_path = os.path.join(dst_path, member.path)
@@ -543,21 +544,19 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             return None
         group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
+        mode_to_use = mode if mode is not None else member.mode
+        log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}, mode_to_use: {oct(mode_to_use)}, member.mode: {oct(member.mode)}')
         member.gid = group_id_to_use
         member.uid = user_id_to_use
-        log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}')
+        member.mode = mode_to_use
         return member
         # tar.extract(member, dst_path)
         # TODONE Confirmed that the file is extracted to the correct path and that force is working
-        # TODO Set the owner, group, and mode of the file
-        # TODO owner
-        # TODO group
-        # os.chown(dst_member_path, user_id_to_use, group_id_to_use)
-        # TODO mode
-        # TODO Figure out what tar extract does by default - what perms does it use?
-        # stat again to confirm
-        # dst_member_stat_result = stat_managed_file(dst_member_path)
-        # log(client.module, f'Destination member path AFTER: {dst_member_path}, stat: {dst_member_stat_result}')
+        # TODONE Set the owner, group, and mode of the file
+        # TODONE owner
+        # TODONE group
+        # TODONE mode
+        # TODO Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
 
 
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
