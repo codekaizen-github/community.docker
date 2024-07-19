@@ -488,6 +488,9 @@ def managed_stat_data_mode_is_symlink(mode):
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
 
+    # TODO Support idempotence. Can we run this atomically to determine if ANY changes needed to be made. Instead of extract_all, may need to use extract.
+    # TODO Support diff mode
+    # TODO Support check mode
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
     src_stat = stat_container_file(
@@ -550,19 +553,21 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         member.uid = user_id_to_use
         member.mode = mode_to_use
         return member
-        # tar.extract(member, dst_path)
-        # TODONE Confirmed that the file is extracted to the correct path and that force is working
-        # TODONE Set the owner, group, and mode of the file
-        # TODONE owner
-        # TODONE group
-        # TODONE mode
-        # TODO Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
-
 
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
         # Foreach member
         tar.extractall(path=dst_path, numeric_owner=True, filter=tar_filter)
-            
+
+    # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
+    group_id_to_use = group_id if group_id is not None else os.getgid()
+    user_id_to_use = owner_id if owner_id is not None else os.getuid()
+    mode_to_use = mode
+
+    os.chown(managed_path, user_id_to_use, group_id_to_use)
+    if mode_to_use is not None:
+        os.chmod(managed_path, mode_to_use)
+
+
 
 
 def is_file_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
