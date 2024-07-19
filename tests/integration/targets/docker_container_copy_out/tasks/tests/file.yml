@@ -117,6 +117,12 @@
 #     state: link
 #     follow: True
 
+# Create a directory that is empty
+- name: Create directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir4"
+    state: directory
+
 ################################################################################################
 # Do tests
 
@@ -181,6 +187,7 @@
 #     path: "{{ remote_tmp_dir }}/testdir2"
 #   register: result_dir_nesting_file_exists_but_different
 
+
 - name: Copy directory with nesting to a directory that does not exist
   docker_container_copy_out:
     container: "{{ cname }}"
@@ -189,8 +196,22 @@
     force: True
     archive_mode: True
     group_id: 1001
+    mode: '0775'
   become: True # https://stackoverflow.com/a/7245654
   register: result_dir_nesting_does_not_exist
+
+- name: Copy directory with nesting to a directory that does exist but is empty
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir
+    path: "{{ remote_tmp_dir }}/testdir4"
+    force: True
+    archive_mode: True
+    group_id: 1001
+    mode: '0775'
+  become: True # https://stackoverflow.com/a/7245654
+  register: result_dir_nesting_does_exist_empty
+
 
 # - name: Copy symlink to directory
 #   docker_container_copy_out:
@@ -259,6 +280,12 @@
     path: "{{ remote_tmp_dir }}/testdir3"
   register: stat_dir3
 
+- name: Stat directory existed and was empty but now has files
+  stat:
+    path: "{{ remote_tmp_dir }}/testdir4"
+  register: stat_dir4
+
+
 - name: Check results
   assert:
     that:
@@ -290,6 +317,8 @@
       # - stat_lndir2.stat.islnk
       - stat_dir3.stat.exists
       - stat_dir3.stat.isdir
+      - stat_dir4.stat.exists
+      - stat_dir4.stat.isdir
 
 ################################################################################################
 # Cleanup
