@@ -484,6 +484,157 @@ def container_stat_data_mode_is_symlink(mode):
 def managed_stat_data_mode_is_symlink(mode):
     return stat.S_ISLNK(mode)
 
+def container_stat_data_mode_to_managed_stat_data_mode(mode):
+    return mode
+    # return mode >> 17
+
+def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
+
+    if not isinstance(tarinfo, tarfile.TarInfo):
+        raise ValueError(f'tarinfo must be instance of tarfile.TarInfo')
+    if not isinstance(stat_result, os.stat_result):
+        raise ValueError(f'stat_result must be instance of os.stat_result')
+
+    if tarinfo.isreg() and stat.S_ISREG(stat_result.st_mode):
+        return True
+    if tarinfo.isdir() and stat.S_ISDIR(stat_result.st_mode):
+        return True
+    if tarinfo.issym() and stat.S_ISLNK(stat_result.st_mode):
+        return True
+    if tarinfo.islnk() and stat_result.st_nlink > 1:
+        return True
+    if tarinfo.ischr() and stat.S_ISCHR(stat_result.st_mode):
+        return True
+    if tarinfo.isblk() and stat.S_ISBLK(stat_result.st_mode):
+        return True
+    if tarinfo.isfifo() and stat.S_ISFIFO(stat_result.st_mode):
+        return True
+
+    return False
+
+def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+                       force=False, diff=None, max_file_size_for_diff=1):
+    # Always execute if force is True
+    if force is True:
+        return False
+    # TODO Support diff mode
+    # TODO Support check mode
+    # Stat the container file (needed to determine if symlink and should follow)
+    # Throws an error if container file doesn't exist
+    src_stat = stat_container_file(
+        client,
+        container,
+        in_path=container_path,
+    )
+    src_is_followed_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
+    # Stat the local file
+    dst_stat = None
+    try:
+        dst_stat = stat_managed_file(managed_path)
+    except FileNotFoundError:
+        return False
+
+    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
+    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
+    # If follow_links, then we want to get the real path of the file in the container
+    src_stat_follow_links = None
+    if src_is_followed_symlink:
+        # Will throw error if file does not exist
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
+    # If follow_links, then we want to get the real path of the file on managed node
+    dst_stat_follow_links = None
+    if dst_is_followed_symlink:
+        dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+
+    src_stat_to_compare = src_stat_follow_links if src_stat_follow_links is not None else src_stat
+    dst_stat_to_compare = dst_stat_follow_links if dst_stat_follow_links is not None else dst_stat
+
+    # Compare the stats
+    # src_stat_to_compare: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_to_compare: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
+    if src_stat_to_compare is None:
+        raise DockerFileNotFound(
+                    'File {container_path} does not exist in container {container}'
+                    .format(container_path=container_path, container=container)
+                )
+    if dst_stat_to_compare is None:
+        return False
+
+    # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
+    group_id_to_use = group_id if group_id is not None else os.getgid()
+    user_id_to_use = owner_id if owner_id is not None else os.getuid()
+    mode_to_use = mode
+    # | File Type | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
+    # | 4 bits    | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
+    # Unfortunately, cannot detect file type from the stat results
+    # Docker Engine API returned for directory: 0b10000000000000000000000111101101
+    # Docker Engine API returned for regular file: 0b110100100
+    # Type
+    # if (src_stat_to_compare['mode'] & 0xF000) != (dst_stat_to_compare.st_mode & 0xF000):
+    #     return False
+    # Size
+    if src_stat_to_compare['size'] != dst_stat_to_compare.st_size:
+        return False
+    # User
+    if group_id_to_use != dst_stat_to_compare.st_gid:
+        return False
+    # Group
+    if user_id_to_use != dst_stat_to_compare.st_uid:
+        return False
+    # Permissions
+    # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
+    # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
+    # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
+    if mode_to_use is not None and (dst_stat_to_compare.st_mode & 0o7777) != mode_to_use:
+        return False
+
+    # Get the tar content of container_path
+    try:
+        stream = client.get_raw_stream(
+            '/containers/{0}/archive'.format(container),
+            params={'path': src_path},
+            headers={'Accept-Encoding': 'identity'},
+        )
+    except NotFound:
+        raise DockerFileNotFound('File {0} does not exist in container {1}'.format(src_path, container))
+
+    with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
+        for member in tar:
+            # TODO If check mode, return None so that the file is not extracted
+            log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
+            # Derive path that file will be written to when expanded
+            dst_member_path = os.path.join(dst_path, member.path)
+            # Stat the managed path
+            dst_member_stat = None
+            try:
+                dst_member_stat = stat_managed_file(dst_member_path)
+            except FileNotFoundError:
+                return False
+            # Check force settings first
+            if dst_member_stat is not None and force is False:
+                # Could still be idempotent
+                continue
+            group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
+            user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
+            mode_to_use = mode if mode is not None else member.mode
+            # Type
+            if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
+                return False
+            # Size
+            if member.size != dst_member_stat.st_size:
+                return False
+            # User
+            if user_id_to_use != dst_member_stat.st_uid:
+                return False
+            # Group
+            if group_id_to_use != dst_member_stat.st_gid:
+                return False
+            # Permissions
+            if mode_to_use != (dst_member_stat.st_mode & 0o7777):
+                return False
+
+    return True
+
 
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
@@ -541,14 +692,16 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             dst_member_stat = stat_managed_file(dst_member_path)
         except FileNotFoundError:
             pass
-        log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
+        # if dst_member_stat:
+        #     log(client.module, f'container mode: {bin(member.mode)}, managed mode: {bin(dst_member_stat.st_mode)}')
+        # log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
         # Check force settings first
-        if dst_member_stat is not None and not force:
+        if dst_member_stat is not None and force is False:
             return None
         group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
         mode_to_use = mode if mode is not None else member.mode
-        log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}, mode_to_use: {oct(mode_to_use)}, member.mode: {oct(member.mode)}')
+        # log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}, mode_to_use: {oct(mode_to_use)}, member.mode: {oct(member.mode)}')
         member.gid = group_id_to_use
         member.uid = user_id_to_use
         member.mode = mode_to_use
@@ -860,22 +1013,21 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         diff = {}
     else:
         diff = None
-    idempotent = False
-    # idempotent = is_file_idempotent(
-    #     client,
-    #     container,
-    #     managed_path,
-    #     container_path,
-    #     follow_links,
-    #     local_follow_links,
-    #     archive_mode,
-    #     owner_id,
-    #     group_id,
-    #     mode,
-    #     force=force,
-    #     diff=diff,
-    #     max_file_size_for_diff=max_file_size_for_diff,
-    # )
+    idempotent = is_idempotent(
+        client,
+        container,
+        managed_path,
+        container_path,
+        follow_links=follow_links,
+        local_follow_links=local_follow_links,
+        archive_mode=archive_mode,
+        owner_id=owner_id,
+        group_id=group_id,
+        mode=mode,
+        force=force,
+        diff=diff,
+        max_file_size_for_diff=max_file_size_for_diff,
+    )
     changed = not idempotent
 
     if changed and not client.module.check_mode:
