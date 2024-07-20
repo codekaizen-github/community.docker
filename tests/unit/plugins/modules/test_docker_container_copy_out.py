@@ -65,7 +65,9 @@ from ansible_collections.community.docker.plugins.modules.docker_container_copy_
     ('004', 0o004),
     ('0006', 0o006),
     ('006', 0o006),
-    ('0002', 0o002)
+    ('0002', 0o002),
+    ('7777', 0o7777),
+    ('4777', 0o4777),
 ])
 def test_mode_to_int_literal_positives(mode, expected):
     assert mode_to_int_literal(mode) == expected
