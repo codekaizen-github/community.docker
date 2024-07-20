@@ -514,11 +514,10 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
 def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
+    # TODO: Debug why after copying same file 2x, the 2nd time is still showing changed: true
     # Always execute if force is True
     if force is True:
         return False
-    # TODO Support diff mode
-    # TODO Support check mode
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
     src_stat = stat_container_file(
@@ -632,6 +631,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             # Permissions
             if mode_to_use != (dst_member_stat.st_mode & 0o7777):
                 return False
+            # TODO: Compare Content
 
     return True
 
@@ -788,7 +788,6 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
             dst_file_type = stat.S_IFMT(dst_stat.st_mode)
             if src_file_type != dst_file_type:
                 return False
-            # TODO how can we get the UID and GID of the container file? Will we need to fetch tar over the API?
             try:
                 stream = client.get_raw_stream(
                     '/containers/{0}/archive', container,
@@ -1129,7 +1128,6 @@ def main():
         client.fail(to_native(exc))
 
     try:
-        # TODO: Use fetch_file() method from plugins/module_utils/copy.py
         copy_file_out_of_container(
             client,
             container,
