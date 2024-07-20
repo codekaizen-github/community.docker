@@ -159,12 +159,19 @@
 #     path: "{{ remote_tmp_dir }}/file_2"
 #   register: result_2
 
-# - name: Copy file 3
-#   docker_container_copy_out:
-#     container: "{{ cname }}"
-#     container_path: /test/container/path/file_3
-#     path: "{{ remote_tmp_dir }}/file_3"
-#   register: result_3
+- name: Copy file 3
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_3
+    path: "{{ remote_tmp_dir }}/file_3"
+  register: result_3
+
+- name: Copy file 3 again
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_3
+    path: "{{ remote_tmp_dir }}/file_3"
+  register: result_3
 
 # - name: Copy directory with nesting to a directory with nesting that already exists
 #   docker_container_copy_out:
@@ -196,7 +203,7 @@
     force: True
     archive_mode: True
     group_id: 1001
-    mode: '0775'
+    mode: '0755'
   become: True # https://stackoverflow.com/a/7245654
   register: result_dir_nesting_does_not_exist
 
@@ -208,7 +215,7 @@
     force: True
     archive_mode: True
     group_id: 1001
-    mode: '0775'
+    mode: '0755'
   become: True # https://stackoverflow.com/a/7245654
   register: result_dir_nesting_does_exist_empty
 
