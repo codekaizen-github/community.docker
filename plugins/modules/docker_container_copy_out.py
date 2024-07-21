@@ -193,6 +193,12 @@ from ansible_collections.community.docker.plugins.module_utils._scramble import 
 
 import datetime
 
+from inspect import currentframe
+
+def get_current_line_number():
+    cf = currentframe()
+    return cf.f_back.f_lineno
+
 def log(module, msg):
     # Get a timestamp
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -517,6 +523,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     # TODO: Debug why after copying same file 2x, the 2nd time is still showing changed: true
     # Always execute if force is True
     if force is True:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
@@ -532,6 +539,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     try:
         dst_stat = stat_managed_file(managed_path)
     except FileNotFoundError:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
@@ -557,6 +565,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
                     .format(container_path=container_path, container=container)
                 )
     if dst_stat_to_compare is None:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
@@ -572,19 +581,25 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     # if (src_stat_to_compare['mode'] & 0xF000) != (dst_stat_to_compare.st_mode & 0xF000):
     #     return False
     # Size
-    if src_stat_to_compare['size'] != dst_stat_to_compare.st_size:
-        return False
+    # if src_stat_to_compare['size'] != dst_stat_to_compare.st_size:
+    #     src_size = src_stat_to_compare['size']
+    #     log(client.module, f'{__file__}:{get_current_line_number()}:{src_size}:{dst_stat_to_compare.st_size}')
+    #     log(client.module, f'{__file__}:{get_current_line_number()}:{dst_stat_to_compare}')
+    #     return False
     # User
     if group_id_to_use != dst_stat_to_compare.st_gid:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
     # Group
     if user_id_to_use != dst_stat_to_compare.st_uid:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
     # Permissions
     # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
     # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
     # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
     if mode_to_use is not None and (dst_stat_to_compare.st_mode & 0o7777) != mode_to_use:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     # Get the tar content of container_path
@@ -608,6 +623,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             try:
                 dst_member_stat = stat_managed_file(dst_member_path)
             except FileNotFoundError:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Check force settings first
             if dst_member_stat is not None and force is False:
@@ -618,18 +634,23 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             mode_to_use = mode if mode is not None else member.mode
             # Type
             if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Size
             if member.size != dst_member_stat.st_size:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # User
             if user_id_to_use != dst_member_stat.st_uid:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Group
             if group_id_to_use != dst_member_stat.st_gid:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Permissions
             if mode_to_use != (dst_member_stat.st_mode & 0o7777):
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # TODO: Compare Content
 
@@ -638,7 +659,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
 
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
-
+    # TODO If the src is a single file
     # TODO Support idempotence. Can we run this atomically to determine if ANY changes needed to be made. Instead of extract_all, may need to use extract.
     # TODO Support diff mode
     # TODO Support check mode
