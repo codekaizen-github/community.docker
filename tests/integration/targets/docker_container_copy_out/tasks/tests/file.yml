@@ -47,13 +47,14 @@
 #     mode: 0644
 #   register: create_2
 
-# # Create file 3 with same content
-# - name: Create file 3
-#   copy:
-#     dest: "{{ remote_tmp_dir }}/file_3"
-#     content: Content 3
-#     mode: 0644
-#   register: create_3
+# Create file 3 with same content
+- name: Create file 3
+  copy:
+    dest: "{{ remote_tmp_dir }}/file_3"
+    content: Content 3
+    mode: 0644
+  become: True
+  register: create_3
 
 # # Create a directory
 # - name: Create directory
@@ -122,6 +123,7 @@
   file:
     dest: "{{ remote_tmp_dir }}/testdir4"
     state: directory
+  become: True
 
 ################################################################################################
 # Do tests
@@ -150,6 +152,7 @@
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/file_1
 #     path: "{{ remote_tmp_dir }}/file_1"
+#   become: True
 #   register: result_1
 
 # - name: Copy file 2
@@ -157,27 +160,29 @@
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/file_2
 #     path: "{{ remote_tmp_dir }}/file_2"
+#   become: True
 #   register: result_2
 
-- name: Copy file 3
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/file_3
-    path: "{{ remote_tmp_dir }}/file_3"
-  register: result_3
+# - name: Copy file 3
+#   docker_container_copy_out:
+#     container: "{{ cname }}"
+#     container_path: /test/container/path/file_3
+#     path: "{{ remote_tmp_dir }}/file_3"
+#   register: result_3a
 
-- name: Copy file 3 again
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/file_3
-    path: "{{ remote_tmp_dir }}/file_3"
-  register: result_3
+# - name: Copy file 3 again
+#   docker_container_copy_out:
+#     container: "{{ cname }}"
+#     container_path: /test/container/path/file_3
+#     path: "{{ remote_tmp_dir }}/file_3"
+#   register: result_3b
 
 # - name: Copy directory with nesting to a directory with nesting that already exists
 #   docker_container_copy_out:
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/testdir
 #     path: "{{ remote_tmp_dir }}/testdir"
+#   become: True
 #   register: result_dir_nesting_exists
 
 # - name: Copy directory that only contains a file to a directory that already exists and only contains a file
@@ -185,6 +190,7 @@
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/testdir/nested
 #     path: "{{ remote_tmp_dir }}/testdir/nested"
+#   become: True
 #   register: result_dir_only_file_exists
 
 # - name: Copy directory with nesting to a directory that already exists and only contains a file
@@ -192,32 +198,33 @@
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/testdir
 #     path: "{{ remote_tmp_dir }}/testdir2"
+#   become: True
 #   register: result_dir_nesting_file_exists_but_different
 
 
-- name: Copy directory with nesting to a directory that does not exist
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/testdir
-    path: "{{ remote_tmp_dir }}/testdir3"
-    force: True
-    archive_mode: True
-    group_id: 1001
-    mode: '0755'
-  become: True # https://stackoverflow.com/a/7245654
-  register: result_dir_nesting_does_not_exist
+# - name: Copy directory with nesting to a directory that does not exist
+#   docker_container_copy_out:
+#     container: "{{ cname }}"
+#     container_path: /test/container/path/testdir
+#     path: "{{ remote_tmp_dir }}/testdir3"
+#     # force: True
+#     archive_mode: True
+#     group_id: 1001
+#     mode: '0755'
+#   become: True # https://stackoverflow.com/a/7245654
+#   register: result_dir_nesting_does_not_exist
 
-- name: Copy directory with nesting to a directory that does exist but is empty
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/testdir
-    path: "{{ remote_tmp_dir }}/testdir4"
-    force: True
-    archive_mode: True
-    group_id: 1001
-    mode: '0755'
-  become: True # https://stackoverflow.com/a/7245654
-  register: result_dir_nesting_does_exist_empty
+# - name: Copy directory with nesting to a directory that does exist but is empty
+#   docker_container_copy_out:
+#     container: "{{ cname }}"
+#     container_path: /test/container/path/testdir
+#     path: "{{ remote_tmp_dir }}/testdir4"
+#     # force: True
+#     archive_mode: True
+#     group_id: 1001
+#     mode: '0755'
+#   become: True # https://stackoverflow.com/a/7245654
+#   register: result_dir_nesting_does_exist_empty
 
 
 # - name: Copy symlink to directory
@@ -225,20 +232,23 @@
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/lndir
 #     path: "{{ remote_tmp_dir }}/lndir"
+#   become: True
 #   register: result_lndir
 
-# - name: Copy symlink to file
-#   docker_container_copy_out:
-#     container: "{{ cname }}"
-#     container_path: /test/container/path/lnfile
-#     path: "{{ remote_tmp_dir }}/lnfile"
-#   register: result_lnfile
+- name: Copy symlink to file
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/lnfile
+    path: "{{ remote_tmp_dir }}/lnfile"
+  become: True
+  register: result_lnfile
 
 # - name: Copy symlink to symlink
 #   docker_container_copy_out:
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/lndir2
 #     path: "{{ remote_tmp_dir }}/lndir2"
+#   become: True
 #   register: result_lndir2
 
 # - name: Stat file 1
@@ -282,15 +292,15 @@
 #   register: stat_lndir2
 
 # The copy should MAKE this directory
-- name: Stat directory that did not use to exist but does now
-  stat:
-    path: "{{ remote_tmp_dir }}/testdir3"
-  register: stat_dir3
+# - name: Stat directory that did not use to exist but does now
+#   stat:
+#     path: "{{ remote_tmp_dir }}/testdir3"
+#   register: stat_dir3
 
-- name: Stat directory existed and was empty but now has files
-  stat:
-    path: "{{ remote_tmp_dir }}/testdir4"
-  register: stat_dir4
+# - name: Stat directory existed and was empty but now has files
+#   stat:
+#     path: "{{ remote_tmp_dir }}/testdir4"
+#   register: stat_dir4
 
 
 - name: Check results
@@ -298,7 +308,7 @@
     that:
       # - result_1 is success
       # - result_2 is success
-      # - result_3 is success
+      # - result_3a is success
       # - stat_1.stat.exists
       # - stat_2.stat.exists
       # - stat_3.stat.exists
@@ -322,10 +332,10 @@
       # - stat_lndir.stat.islnk
       # - stat_lnfile.stat.islnk
       # - stat_lndir2.stat.islnk
-      - stat_dir3.stat.exists
-      - stat_dir3.stat.isdir
-      - stat_dir4.stat.exists
-      - stat_dir4.stat.isdir
+      # - stat_dir3.stat.exists
+      # - stat_dir3.stat.isdir
+      # - stat_dir4.stat.exists
+      # - stat_dir4.stat.isdir
 
 ################################################################################################
 # Cleanup

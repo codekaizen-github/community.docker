@@ -205,6 +205,60 @@ def log(module, msg):
     timestamped_msg = f'{timestamp}: docker_container_copy_out: {msg}'
     module.log(timestamped_msg)
 
+# https://pkg.go.dev/io/fs#FileMode
+CONTAINER_MODE_BIT_DIR = 1
+CONTAINER_MODE_BIT_TEMPORARY = 4
+CONTAINER_MODE_BIT_SYMLINK = 5
+CONTAINER_MODE_BIT_DEVICE = 6
+CONTAINER_MODE_BIT_NAMED_PIPE = 7
+CONTAINER_MODE_BIT_SOCKET = 8
+CONTAINER_MODE_BIT_CHAR_DEVICE = 11
+CONTAINER_MODE_BIT_IRREGULAR = 13
+
+def container_mode_is(mode, container_mode_bit):
+    if not isinstance(mode, int):
+        raise ValueError(f'mode must be instance of int')
+    if not isinstance(container_mode_bit, int):
+        raise ValueError(f'container_mode_bit must be instance of int')
+    return mode & (1 << (32 - container_mode_bit)) != 0
+
+def container_mode_is_regular(mode):
+    return not (
+        container_mode_is_dir(mode)
+        or container_mode_is_temporary(mode)
+        or container_mode_is_symlink(mode)
+        or container_mode_is_device(mode)
+        or container_mode_is_named_pipe(mode)
+        or container_mode_is_socket(mode)
+        or container_mode_is_char_device(mode)
+        or container_mode_is_irregular(mode)
+    )
+
+def container_mode_is_dir(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_DIR)
+
+def container_mode_is_temporary(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_TEMPORARY)
+
+def container_mode_is_symlink(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_SYMLINK)
+
+def container_mode_is_device(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_DEVICE)
+
+def container_mode_is_named_pipe(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_NAMED_PIPE)
+
+def container_mode_is_socket(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_SOCKET)
+
+def container_mode_is_char_device(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_CHAR_DEVICE)
+
+def container_mode_is_irregular(mode):
+    return container_mode_is(mode, CONTAINER_MODE_BIT_IRREGULAR)
+
+
 def are_fileobjs_equal(f1, f2):
     '''Given two (buffered) file objects, compare their contents.'''
     blocksize = 65536
@@ -484,9 +538,6 @@ def stat_container_file_resolve_symlinks(client, container, in_path):
 def stat_managed_file_resolve_symlinks(managed_path):
     return os.stat(managed_path)
 
-def container_stat_data_mode_is_symlink(mode):
-    return stat_data_mode_is_symlink(mode)
-
 def managed_stat_data_mode_is_symlink(mode):
     return stat.S_ISLNK(mode)
 
@@ -520,11 +571,13 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
 def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
+    # TODO How can we know if tarfile.extractall() is going to create a new folder (vs just copying content into existing)? In this case, we need to set mode.
+    # See: - name: Copy directory with nesting to a directory with nesting that already exists
     # TODO: Debug why after copying same file 2x, the 2nd time is still showing changed: true
     # Always execute if force is True
     if force is True:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
+    src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
     src_stat = stat_container_file(
@@ -532,14 +585,13 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         container,
         in_path=container_path,
     )
-    src_is_followed_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
     src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
     # Stat the local file
     dst_stat = None
     try:
         dst_stat = stat_managed_file(managed_path)
     except FileNotFoundError:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
@@ -552,55 +604,54 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     # If follow_links, then we want to get the real path of the file on managed node
     dst_stat_follow_links = None
     if dst_is_followed_symlink:
-        dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+        try:
+            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+        except FileNotFoundError:
+            pass
 
-    src_stat_to_compare = src_stat_follow_links if src_stat_follow_links is not None else src_stat
-    dst_stat_to_compare = dst_stat_follow_links if dst_stat_follow_links is not None else dst_stat
-
+    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
+    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
+    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only
     # Compare the stats
-    # src_stat_to_compare: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_to_compare: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
-    if src_stat_to_compare is None:
+    # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
+    if src_stat_ultimate is None:
         raise DockerFileNotFound(
                     'File {container_path} does not exist in container {container}'
                     .format(container_path=container_path, container=container)
                 )
-    if dst_stat_to_compare is None:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
+    if dst_stat_ultimate is None:
         return False
 
-    # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
-    group_id_to_use = group_id if group_id is not None else os.getgid()
-    user_id_to_use = owner_id if owner_id is not None else os.getuid()
-    mode_to_use = mode
-    # | File Type | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
-    # | 4 bits    | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
-    # Unfortunately, cannot detect file type from the stat results
-    # Docker Engine API returned for directory: 0b10000000000000000000000111101101
-    # Docker Engine API returned for regular file: 0b110100100
-    # Type
-    # if (src_stat_to_compare['mode'] & 0xF000) != (dst_stat_to_compare.st_mode & 0xF000):
-    #     return False
-    # Size
-    # if src_stat_to_compare['size'] != dst_stat_to_compare.st_size:
-    #     src_size = src_stat_to_compare['size']
-    #     log(client.module, f'{__file__}:{get_current_line_number()}:{src_size}:{dst_stat_to_compare.st_size}')
-    #     log(client.module, f'{__file__}:{get_current_line_number()}:{dst_stat_to_compare}')
-    #     return False
-    # User
-    if group_id_to_use != dst_stat_to_compare.st_gid:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
-        return False
-    # Group
-    if user_id_to_use != dst_stat_to_compare.st_uid:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
-        return False
-    # Permissions
-    # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
-    # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
-    # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
-    if mode_to_use is not None and (dst_stat_to_compare.st_mode & 0o7777) != mode_to_use:
-        log(client.module, f'{__file__}:{get_current_line_number()}')
-        return False
+    if tar_will_create_folder:
+        # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
+        group_id_to_use = group_id if group_id is not None else os.getgid()
+        user_id_to_use = owner_id if owner_id is not None else os.getuid()
+        mode_to_use = mode
+        src_stat_ultimate_mode = src_stat_ultimate['mode']
+        # | File Type | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
+        # | 4 bits    | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
+        # Unfortunately, cannot detect file type from the stat results
+        # Docker Engine API returned for directory: 0b10000000000000000000000111101101
+        # Docker Engine API returned for regular file: 0b110100100
+        # Type
+        # if (src_stat_ultimate['mode'] & 0xF000) != (dst_stat_ultimate.st_mode & 0xF000):
+        #     return False
+        # Size
+        # if src_stat_ultimate['size'] != dst_stat_ultimate.st_size:
+        #     src_size = src_stat_ultimate['size']
+        #     return False
+        # User
+        if group_id_to_use != dst_stat_ultimate.st_gid:
+            return False
+        # Group
+        if user_id_to_use != dst_stat_ultimate.st_uid:
+            return False
+        # Permissions
+        # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
+        # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
+        # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
+        if mode_to_use is not None and (dst_stat_ultimate.st_mode & 0o7777) != mode_to_use:
+            return False
 
     # Get the tar content of container_path
     try:
@@ -615,7 +666,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
         for member in tar:
             # TODO If check mode, return None so that the file is not extracted
-            log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
             # Derive path that file will be written to when expanded
             dst_member_path = os.path.join(dst_path, member.path)
             # Stat the managed path
@@ -623,7 +673,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             try:
                 dst_member_stat = stat_managed_file(dst_member_path)
             except FileNotFoundError:
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Check force settings first
             if dst_member_stat is not None and force is False:
@@ -634,23 +683,18 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             mode_to_use = mode if mode is not None else member.mode
             # Type
             if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Size
             if member.size != dst_member_stat.st_size:
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # User
             if user_id_to_use != dst_member_stat.st_uid:
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Group
             if group_id_to_use != dst_member_stat.st_gid:
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Permissions
             if mode_to_use != (dst_member_stat.st_mode & 0o7777):
-                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # TODO: Compare Content
 
@@ -659,18 +703,30 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
 
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
-    # TODO If the src is a single file
+    if not isinstance(container_path, str):
+        raise ValueError('container_path must be instance of str')
+    # TODO How can we know if tarfile.extractall() is going to create a new folder (vs just copying content into existing)? In this case, we need to set mode, but not otherwise.
+    # I think it is when:
+        # DEST_PATH exists and is a directory
+        # SRC_PATH does not end with /. (that is: slash followed by dot)
+        # the source directory is copied into this directory
+    # In this case, src_stat_ultimate = dir, src_path = '/container/path', managed_path = '/test/path', dst_expand_path = '/test/path',
+    # TODO What about in the case that SRC_PATH ends with /. (that is: slash followed by dot)? Call to stat_container_file should probably remove, but we will need to know because this drives the expand path.
+    # TODO If the src is a single file, can we rename it?
+    # TODO How does this work with folders?
+    # TODO Should we actually be internally setting the dst_path or managed path to the parent of what was passed?
     # TODO Support idempotence. Can we run this atomically to determine if ANY changes needed to be made. Instead of extract_all, may need to use extract.
     # TODO Support diff mode
     # TODO Support check mode
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
+    src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
     src_stat = stat_container_file(
         client,
         container,
         in_path=container_path,
     )
-    src_is_followed_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
     src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
     # Stat the local file
     dst_stat = None
@@ -688,8 +744,13 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     # If follow_links, then we want to get the real path of the file on managed node
     dst_stat_follow_links = None
     if dst_is_followed_symlink:
-        dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-
+        try:
+            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+        except FileNotFoundError:
+            pass
+    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
+    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
+    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only
     # Get the tar content of container_path
     try:
         stream = client.get_raw_stream(
@@ -704,7 +765,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         if not isinstance(member, tarfile.TarInfo):
             raise ValueError('member is not a TarInfo object')
         # TODO If check mode, return None so that the file is not extracted
-        log(client.module, f'TarInfo path: {member.path}, name: {member.name}, size: {member.size}, mode: {member.mode}, UID: {member.uid}, GID: {member.gid}')
         # Derive path that file will be written to when expanded
         dst_member_path = os.path.join(dst_path, member.path)
         # Stat the managed path
@@ -713,16 +773,12 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             dst_member_stat = stat_managed_file(dst_member_path)
         except FileNotFoundError:
             pass
-        # if dst_member_stat:
-        #     log(client.module, f'container mode: {bin(member.mode)}, managed mode: {bin(dst_member_stat.st_mode)}')
-        # log(client.module, f'Destination member path BEFORE: {dst_member_path}, stat: {dst_member_stat}')
         # Check force settings first
         if dst_member_stat is not None and force is False:
             return None
         group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
         mode_to_use = mode if mode is not None else member.mode
-        # log(client.module, f'group_id_to_use: {group_id_to_use}, user_id_to_use: {user_id_to_use}, member.gid: {member.gid}, member.uid: {member.uid}, mode_to_use: {oct(mode_to_use)}, member.mode: {oct(member.mode)}')
         member.gid = group_id_to_use
         member.uid = user_id_to_use
         member.mode = mode_to_use
@@ -732,14 +788,14 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         # Foreach member
         tar.extractall(path=dst_path, numeric_owner=True, filter=tar_filter)
 
-    # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
-    group_id_to_use = group_id if group_id is not None else os.getgid()
-    user_id_to_use = owner_id if owner_id is not None else os.getuid()
-    mode_to_use = mode
-
-    os.chown(managed_path, user_id_to_use, group_id_to_use)
-    if mode_to_use is not None:
-        os.chmod(managed_path, mode_to_use)
+    if tar_will_create_folder:
+        # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
+        group_id_to_use = group_id if group_id is not None else os.getgid()
+        user_id_to_use = owner_id if owner_id is not None else os.getuid()
+        mode_to_use = mode
+        os.chown(managed_path, user_id_to_use, group_id_to_use)
+        if mode_to_use is not None:
+            os.chmod(managed_path, mode_to_use)
 
 
 
@@ -772,7 +828,6 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
     dst_stat_follow_links = None
     if local_follow_links:
         dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-    log(client.module, f'src_stat: {src_stat} | dst_stat: {dst_stat} | src_stat_follow_links: {src_stat_follow_links} | dst_stat_follow_links: {dst_stat_follow_links}')
     # 1. If force == True, we are forcing. File is not idempotent. Shouldn't we provide the diff if asked for?
     if force == True:
         return False
@@ -782,12 +837,12 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         if dst_stat is not None:
             return True
     # 1. If forcing == None (default), then we need to diff the files to see if they are the same to determine idempotence.
-    src_is_symlink = container_stat_data_mode_is_symlink(src_stat['mode'])
+    src_is_symlink = container_mode_is_symlink(src_stat['mode'])
     dst_is_symlink = managed_stat_data_mode_is_symlink(dst_stat.st_mode)
     # Are either of the files symlinks?
     if src_is_symlink or dst_is_symlink:
         # Are they treated as symlinks?
-        src_is_treated_as_symlink = (container_stat_data_mode_is_symlink(src_stat['mode']) and not follow_links)
+        src_is_treated_as_symlink = (container_mode_is_symlink(src_stat['mode']) and not follow_links)
         dst_is_treated_as_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and not local_follow_links)
         # Is one treated as a symlink and the other not? Then not idempotent.
         if src_is_treated_as_symlink != dst_is_treated_as_symlink:
@@ -1027,16 +1082,123 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         follow_links=follow_links,
     )
 
+def determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+                            owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
+    log(client.module, f'{__file__}:{get_current_line_number()}:follow_links:{follow_links}')
+    if not isinstance(container_path, str):
+        raise ValueError('container_path must be instance of str')
+    if not isinstance(managed_path, str):
+        raise ValueError('managed_path must be instance of str')
+    dst_expand_path = managed_path
+    # Throws an error if container file doesn't exist
+    src_stat = stat_container_file(
+        client,
+        container,
+        in_path=container_path,
+    )
+    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
+    # Stat the local file
+    dst_stat = None
+    try:
+        dst_stat = stat_managed_file(managed_path)
+    except FileNotFoundError:
+        pass
+    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
+    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
+    # If follow_links, then we want to get the real path of the file in the container
+    src_stat_follow_links = None
+    if src_is_followed_symlink:
+        # Will throw error if file does not exist
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
+    # If follow_links, then we want to get the real path of the file on managed node
+    dst_stat_follow_links = None
+    if dst_is_followed_symlink:
+        try:
+            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
+        except FileNotFoundError:
+            pass
+
+    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
+    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
+    log(client.module, f'{__file__}:{get_current_line_number()}:src_stat:{src_stat}:src_stat_follow_links:{src_stat_follow_links}:src_stat_ultimate:{src_stat_ultimate}')
+    # TODO LOGIC
+    # TODO Do we resolve symlinks before returning the dst_expand_path? I think we might need to because think how a single file would be expanded.
+    # IF SRC_PATH is a directory (IF SRC_PATH specifies a directory OR a followed symlink to a directory)
+    
+    if container_mode_is_dir(src_stat_ultimate['mode']):
+        log(client.module, f'{__file__}:{get_current_line_number()}')
+        # DEST_PATH exists
+        if dst_stat_ultimate is not None:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
+            # DEST_PATH exists and is a directory
+            if stat.S_ISDIR(dst_stat_ultimate.st_mode):
+                log(client.module, f'{__file__}:{get_current_line_number()}')
+                # SRC_PATH does end with /. (that is: slash followed by dot)
+                if container_path.endswith(f'{os.path.sep}.'):
+                    log(client.module, f'{__file__}:{get_current_line_number()}')
+                    # the content of the source directory is copied into this directory
+                    # TODO: Does this need to be path after resolving symlinks?
+                    dst_expand_path = os.path.dirname(dst_path)
+                # SRC_PATH does not end with /. (that is: slash followed by dot)
+                else:
+                    log(client.module, f'{__file__}:{get_current_line_number()}')
+                    # the source directory is copied into this directory
+                    dst_expand_path = dst_path
+            # DEST_PATH exists and is a file (not a directory)
+            else:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
+                # Error condition: cannot copy a directory to a file
+                raise FileExistsError('Cannot copy a directory to a file')
+        # DEST_PATH does not exist
+        else:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
+            # DEST_PATH is created as a directory and the contents of the source directory are copied into this directory
+            dst_expand_path = dst_path
+    # ELSE SRC_PATH is NOT a directory (aka, specifies a regular file OR a no-follow symlink (even if symlink points to dir) OR a followed symlink to a regular file)
+    else:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
+        # DEST_PATH does not exist
+        if dst_stat_ultimate is None:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
+            # DEST_PATH does not exist and ends with /
+            if managed_path.endswith(os.path.sep):
+                # Error condition: the destination directory must exist.
+                raise FileNotFoundError('The destination directory must exist.')
+            log(client.module, f'{__file__}:{get_current_line_number()}')
+            # the file is saved to a file created at DEST_PATH
+            dst_expand_path = os.path.dirname(dst_path)
+        # DEST_PATH exists
+        else:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
+            # ...and is a directory OR a followed symlink to a directory
+            if stat.S_ISDIR(dst_stat_ultimate.st_mode):
+                # the file is copied into this directory using the basename from SRC_PATH
+                log(client.module, f'{__file__}:{get_current_line_number()}')
+                dst_expand_path = dst_path
+            # ...and is a file (not a directory)
+            else:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
+                # the destination is overwritten with the source file's contents
+                dst_expand_path = os.path.dirname(dst_path)
+    log(client.module, f'managed_path: {managed_path}, dst_expand_path: {dst_expand_path}')
+    return dst_expand_path
+
+
 def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
                              owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     if diff:
         diff = {}
     else:
         diff = None
+    dst_expand_path = determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+                            owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=max_file_size_for_diff)
+
     idempotent = is_idempotent(
         client,
         container,
-        managed_path,
+        # managed_path,
+        dst_expand_path,
         container_path,
         follow_links=follow_links,
         local_follow_links=local_follow_links,
@@ -1054,7 +1216,8 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         copy(
             client,
             container,
-            managed_path,
+            # managed_path,
+            dst_expand_path,
             container_path,
             follow_links=follow_links,
             local_follow_links=local_follow_links,
