@@ -569,11 +569,10 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
     return False
 
-def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+def is_idempotent(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
     # TODO How can we know if tarfile.extractall() is going to create a new folder (vs just copying content into existing)? In this case, we need to set mode.
-    # See: - name: Copy directory with nesting to a directory with nesting that already exists
-    # TODO: Debug why after copying same file 2x, the 2nd time is still showing changed: true
+    # See: - name: Copy directory that only contains a file to a directory that already exists and only contains a file
     # Always execute if force is True
     if force is True:
         return False
@@ -701,7 +700,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     return True
 
 
-def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+def copy(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
@@ -1082,7 +1081,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         follow_links=follow_links,
     )
 
-def determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+def determine_dst_expand_path(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     log(client.module, f'{__file__}:{get_current_line_number()}:follow_links:{follow_links}')
     if not isinstance(container_path, str):
@@ -1125,7 +1124,7 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
     # TODO LOGIC
     # TODO Do we resolve symlinks before returning the dst_expand_path? I think we might need to because think how a single file would be expanded.
     # IF SRC_PATH is a directory (IF SRC_PATH specifies a directory OR a followed symlink to a directory)
-    
+
     if container_mode_is_dir(src_stat_ultimate['mode']):
         log(client.module, f'{__file__}:{get_current_line_number()}')
         # DEST_PATH exists
@@ -1133,9 +1132,11 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
             log(client.module, f'{__file__}:{get_current_line_number()}')
             # DEST_PATH exists and is a directory
             if stat.S_ISDIR(dst_stat_ultimate.st_mode):
-                log(client.module, f'{__file__}:{get_current_line_number()}')
+                log(client.module, f'{__file__}:{get_current_line_number()}, container_path: {container_path}')
                 # SRC_PATH does end with /. (that is: slash followed by dot)
-                if container_path.endswith(f'{os.path.sep}.'):
+                # TODO - Figure out a better way to pass this argument around.
+                # However, be it noted that this is all we need to drive the behavior expected - we just need to set the dest expand path here.
+                if container_path_ends_in_dot or container_path.endswith(f'{os.path.sep}.'):
                     log(client.module, f'{__file__}:{get_current_line_number()}')
                     # the content of the source directory is copied into this directory
                     # TODO: Does this need to be path after resolving symlinks?
@@ -1185,13 +1186,13 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
     return dst_expand_path
 
 
-def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+def copy_file_out_of_container(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
                              owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     if diff:
         diff = {}
     else:
         diff = None
-    dst_expand_path = determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+    dst_expand_path = determine_dst_expand_path(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=max_file_size_for_diff)
 
     idempotent = is_idempotent(
@@ -1200,6 +1201,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         # managed_path,
         dst_expand_path,
         container_path,
+        container_path_ends_in_dot,
         follow_links=follow_links,
         local_follow_links=local_follow_links,
         archive_mode=archive_mode,
@@ -1219,6 +1221,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             # managed_path,
             dst_expand_path,
             container_path,
+            container_path_ends_in_dot,
             follow_links=follow_links,
             local_follow_links=local_follow_links,
             archive_mode=archive_mode,
@@ -1301,8 +1304,10 @@ def main():
     force = client.module.params['force']
     max_file_size_for_diff = client.module.params['_max_file_size_for_diff'] or 1
 
+    container_path_ends_in_dot = container_path.endswith(f'{os.path.sep}.')
+    container_path_normalized = container_path
     try:
-        container_path = normalize_container_path_to_abspath(container_path)
+        container_path_normalized = normalize_container_path_to_abspath(container_path)
     except ValueError as exc:
         client.fail(to_native(exc))
 
@@ -1316,7 +1321,8 @@ def main():
             client,
             container,
             managed_path,
-            container_path,
+            container_path_normalized,
+            container_path_ends_in_dot,
             follow_links=follow,
             local_follow_links=local_follow,
             archive_mode=archive_mode,
