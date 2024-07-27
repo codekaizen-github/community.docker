@@ -693,10 +693,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
                 log(client.module, f'{__file__}:{get_current_line_number()}{member}{dst_member_stat}')
                 return False
-            # Size - only compare if regular file
-            if stat.S_ISREG(dst_member_stat.st_mode) and member.size != dst_member_stat.st_size:
-                log(client.module, f'{__file__}:{get_current_line_number()}{member.path}:{member.size}:{dst_member_path}:{dst_member_stat}')
-                return False
             # User
             if user_id_to_use != dst_member_stat.st_uid:
                 log(client.module, f'{__file__}:{get_current_line_number()}')
@@ -709,8 +705,19 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             if mode_to_use != (dst_member_stat.st_mode & 0o7777):
                 log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
-            # TODO: Compare Content
-
+            # Size, Content - only compare if regular file
+            if stat.S_ISREG(dst_member_stat.st_mode) and member.isreg():
+                # Size
+                if member.size != dst_member_stat.st_size:
+                    log(client.module, f'{__file__}:{get_current_line_number()}{member.path}:{member.size}:{dst_member_path}:{dst_member_stat}')
+                    return False
+                # Content
+                is_equal = True
+                member_io = tar.extractfile(member)
+                with open(dst_member_path, 'rb') as dst_member_io:
+                    is_equal = are_fileobjs_equal(member_io, dst_member_io)
+                if not is_equal:
+                    return False
     return True
 
 
