@@ -569,12 +569,13 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
     return False
 
-def is_idempotent(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
     # TODO How can we know if tarfile.extractall() is going to create a new folder (vs just copying content into existing)? In this case, we need to set mode.
     # See: - name: Copy directory that only contains a file to a directory that already exists and only contains a file
     # Always execute if force is True
     if force is True:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
     src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
     # Stat the container file (needed to determine if symlink and should follow)
@@ -589,8 +590,10 @@ def is_idempotent(client, container, managed_path, container_path, container_pat
     # Stat the local file
     dst_stat = None
     try:
+        # Does NOT resolve symlinks
         dst_stat = stat_managed_file(managed_path)
     except FileNotFoundError:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
@@ -619,6 +622,7 @@ def is_idempotent(client, container, managed_path, container_path, container_pat
                     .format(container_path=container_path, container=container)
                 )
     if dst_stat_ultimate is None:
+        log(client.module, f'{__file__}:{get_current_line_number()}')
         return False
 
     if tar_will_create_folder:
@@ -641,15 +645,18 @@ def is_idempotent(client, container, managed_path, container_path, container_pat
         #     return False
         # User
         if group_id_to_use != dst_stat_ultimate.st_gid:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
             return False
         # Group
         if user_id_to_use != dst_stat_ultimate.st_uid:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
             return False
         # Permissions
         # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
         # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
         # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
         if mode_to_use is not None and (dst_stat_ultimate.st_mode & 0o7777) != mode_to_use:
+            log(client.module, f'{__file__}:{get_current_line_number()}')
             return False
 
     # Get the tar content of container_path
@@ -672,7 +679,9 @@ def is_idempotent(client, container, managed_path, container_path, container_pat
             try:
                 dst_member_stat = stat_managed_file(dst_member_path)
             except FileNotFoundError:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
+            log(client.module, f'{__file__}:{get_current_line_number()}{member.path}:{member.size}:{dst_member_path}:{dst_member_stat}')
             # Check force settings first
             if dst_member_stat is not None and force is False:
                 # Could still be idempotent
@@ -682,25 +691,30 @@ def is_idempotent(client, container, managed_path, container_path, container_pat
             mode_to_use = mode if mode is not None else member.mode
             # Type
             if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
+                log(client.module, f'{__file__}:{get_current_line_number()}{member}{dst_member_stat}')
                 return False
-            # Size
-            if member.size != dst_member_stat.st_size:
+            # Size - only compare if regular file
+            if stat.S_ISREG(dst_member_stat.st_mode) and member.size != dst_member_stat.st_size:
+                log(client.module, f'{__file__}:{get_current_line_number()}{member.path}:{member.size}:{dst_member_path}:{dst_member_stat}')
                 return False
             # User
             if user_id_to_use != dst_member_stat.st_uid:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Group
             if group_id_to_use != dst_member_stat.st_gid:
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # Permissions
             if mode_to_use != (dst_member_stat.st_mode & 0o7777):
+                log(client.module, f'{__file__}:{get_current_line_number()}')
                 return False
             # TODO: Compare Content
 
     return True
 
 
-def copy(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
+def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
@@ -1081,7 +1095,7 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         follow_links=follow_links,
     )
 
-def determine_dst_expand_path(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
+def determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     log(client.module, f'{__file__}:{get_current_line_number()}:follow_links:{follow_links}')
     if not isinstance(container_path, str):
@@ -1136,7 +1150,7 @@ def determine_dst_expand_path(client, container, managed_path, container_path, c
                 # SRC_PATH does end with /. (that is: slash followed by dot)
                 # TODO - Figure out a better way to pass this argument around.
                 # However, be it noted that this is all we need to drive the behavior expected - we just need to set the dest expand path here.
-                if container_path_ends_in_dot or container_path.endswith(f'{os.path.sep}.'):
+                if container_path.endswith(f'{os.path.sep}.'):
                     log(client.module, f'{__file__}:{get_current_line_number()}')
                     # the content of the source directory is copied into this directory
                     # TODO: Does this need to be path after resolving symlinks?
@@ -1186,22 +1200,34 @@ def determine_dst_expand_path(client, container, managed_path, container_path, c
     return dst_expand_path
 
 
-def copy_file_out_of_container(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
+def copy_file_out_of_container(client, container, managed_path, container_path, container_path_normalized, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
                              owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
     if diff:
         diff = {}
     else:
         diff = None
-    dst_expand_path = determine_dst_expand_path(client, container, managed_path, container_path, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
-                            owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=max_file_size_for_diff)
+    dst_expand_path = determine_dst_expand_path(
+        client,
+        container,
+        managed_path,
+        container_path, # Requires knowledge of whether a "dot" was used
+        follow_links,
+        local_follow_links,
+        archive_mode,
+        owner_id,
+        group_id,
+        mode,
+        force=False,
+        diff=False,
+        max_file_size_for_diff=max_file_size_for_diff
+    )
 
     idempotent = is_idempotent(
         client,
         container,
         # managed_path,
         dst_expand_path,
-        container_path,
-        container_path_ends_in_dot,
+        container_path_normalized, # Works with normalized path
         follow_links=follow_links,
         local_follow_links=local_follow_links,
         archive_mode=archive_mode,
@@ -1220,8 +1246,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             container,
             # managed_path,
             dst_expand_path,
-            container_path,
-            container_path_ends_in_dot,
+            container_path_normalized, # Works with normalized path
             follow_links=follow_links,
             local_follow_links=local_follow_links,
             archive_mode=archive_mode,
@@ -1304,6 +1329,7 @@ def main():
     force = client.module.params['force']
     max_file_size_for_diff = client.module.params['_max_file_size_for_diff'] or 1
 
+    # TODO: Delegate this logic to only the function that needs to know (determine_dst_expand_path)
     container_path_ends_in_dot = container_path.endswith(f'{os.path.sep}.')
     container_path_normalized = container_path
     try:
@@ -1321,6 +1347,7 @@ def main():
             client,
             container,
             managed_path,
+            container_path,
             container_path_normalized,
             container_path_ends_in_dot,
             follow_links=follow,
