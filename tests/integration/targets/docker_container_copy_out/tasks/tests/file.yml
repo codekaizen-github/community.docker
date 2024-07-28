@@ -27,6 +27,7 @@
         echo -n "Content 4" > /test/container/path/testdir/file_4;
         mkdir -p /test/container/path/testdir/nested;
         echo -n "Content 5" > /test/container/path/testdir/nested/file_5;
+        chown 65534:65534 /test/container/path/testdir/nested/file_5;
         ln -nfs /test/container/path/testdir /test/container/path/lndir;
         ln -nfs /test/container/path/file_1 /test/container/path/lnfile;
         ln -nfs /test/container/path/lndir /test/container/path/lndir2;
@@ -53,20 +54,27 @@
     dest: "{{ remote_tmp_dir }}/file_3"
     content: Content 3
     mode: 0644
-  become: True
   register: create_3
 
-# # Create a directory
-# - name: Create directory
-#   file:
-#     dest: "{{ remote_tmp_dir }}/testdir"
-#     state: directory
+# Create a directory
+- name: Create directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir"
+    state: directory
 
-# # Create a nested directory
-# - name: Create nested directory
-#   file:
-#     dest: "{{ remote_tmp_dir }}/testdir/nested"
-#     state: directory
+# Create a nested directory
+- name: Create nested directory
+  file:
+    dest: "{{ remote_tmp_dir }}/testdir/nested"
+    state: directory
+
+- name: Create file in nested directory
+  copy:
+    dest: "{{ remote_tmp_dir }}/testdir/nested/file_5"
+    content: Content 6
+    mode: 0644
+  register: create_file_5
+
 
 # # Create a different directory
 # - name: Create different directory
@@ -116,44 +124,48 @@
 #     src: "{{ remote_tmp_dir }}/lndir/file_4"
 #     dest: "{{ remote_tmp_dir }}/lnfile2"
 #     state: link
-#     follow: True
 
 # Create a directory that is empty
-- name: Create directory
-  file:
-    dest: "{{ remote_tmp_dir }}/testdir4"
-    state: directory
-  become: True
+# - name: Create directory
+#   file:
+#     dest: "{{ remote_tmp_dir }}/testdir4"
+#     state: directory
 
 ################################################################################################
 # Do tests
 
 ######################### Invalid params
 
-- name: Test invalid mode
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/file_1
-    path: "{{ remote_tmp_dir }}/file_1"
-    mode: 1234123412341431241
-  register: result_invalid_mode
-  ignore_errors: true
-
-- name: Check results
-  assert:
-    that:
-      - result_invalid_mode is failed
-      - result_invalid_mode.msg == "\"1234123412341431241\" is not a valid mode"
-
-######################### Copy
-
-# - name: Copy file 1
+# - name: Test invalid mode
 #   docker_container_copy_out:
 #     container: "{{ cname }}"
 #     container_path: /test/container/path/file_1
 #     path: "{{ remote_tmp_dir }}/file_1"
-#   become: True
-#   register: result_1
+#     mode: 1234123412341431241
+#   register: result_invalid_mode
+#   ignore_errors: true
+
+# - name: Check results
+#   assert:
+#     that:
+#       - result_invalid_mode is failed
+#       - result_invalid_mode.msg == "\"1234123412341431241\" is not a valid mode"
+
+######################### Copy
+
+- name: Copy file 1
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_1
+    path: "{{ remote_tmp_dir }}/file_1"
+  register: result_1
+
+- name: Copy file 1 and rename
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/file_1
+    path: "{{ remote_tmp_dir }}/file_renamed_1"
+  register: result_1
 
 # - name: Copy file 2
 #   docker_container_copy_out:
@@ -185,13 +197,25 @@
 #   become: True
 #   register: result_dir_nesting_exists
 
-# - name: Copy directory that only contains a file to a directory that already exists and only contains a file
-#   docker_container_copy_out:
-#     container: "{{ cname }}"
-#     container_path: /test/container/path/testdir/nested
-#     path: "{{ remote_tmp_dir }}/testdir/nested"
-#   become: True
-#   register: result_dir_only_file_exists
+# WITHOUT DOT .
+- name: Copy directory that only contains a file to a directory that already exists and only contains a file
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir/nested
+    path: "{{ remote_tmp_dir }}/testdir/nested"
+  register: result_dir_only_file_exists
+
+# WITH DOT .
+- name: Copy directory that only contains a file to a directory that already exists and only contains a file but use a dot
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir/nested/.
+    path: "{{ remote_tmp_dir }}/testdir/nested"
+    # Note: If you specify archive_mode, `become: True` is required because only root user can change privs.
+    # archive_mode: True
+    # group_id: 65534
+    # owner_id: 65534
+  register: result_dir_only_file_exists
 
 # - name: Copy directory with nesting to a directory that already exists and only contains a file
 #   docker_container_copy_out:
@@ -201,18 +225,21 @@
 #   become: True
 #   register: result_dir_nesting_file_exists_but_different
 
+# Behavior should be the same as below (after testing with Docker cp). It should create the new directory and expand the contents there.
+- name: Copy directory with nesting to a directory that does **not** exist and do not use dot
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir
+    path: "{{ remote_tmp_dir }}/testdir3"
+  register: result_dir_nesting_does_not_exist
 
-# - name: Copy directory with nesting to a directory that does not exist
-#   docker_container_copy_out:
-#     container: "{{ cname }}"
-#     container_path: /test/container/path/testdir
-#     path: "{{ remote_tmp_dir }}/testdir3"
-#     # force: True
-#     archive_mode: True
-#     group_id: 1001
-#     mode: '0755'
-#   become: True # https://stackoverflow.com/a/7245654
-#   register: result_dir_nesting_does_not_exist
+# Behavior should be the same as above (after testing with Docker cp). It should create the new directory and expand the contents there.
+- name: Copy directory with nesting to a directory that does not exist using dot
+  docker_container_copy_out:
+    container: "{{ cname }}"
+    container_path: /test/container/path/testdir/.
+    path: "{{ remote_tmp_dir }}/testdir4"
+  register: result_dir_nesting_does_not_exist
 
 # - name: Copy directory with nesting to a directory that does exist but is empty
 #   docker_container_copy_out:
@@ -235,13 +262,13 @@
 #   become: True
 #   register: result_lndir
 
-- name: Copy symlink to file
-  docker_container_copy_out:
-    container: "{{ cname }}"
-    container_path: /test/container/path/lnfile
-    path: "{{ remote_tmp_dir }}/lnfile"
-  become: True
-  register: result_lnfile
+# - name: Copy symlink to file
+#   docker_container_copy_out:
+#     container: "{{ cname }}"
+#     container_path: /test/container/path/lnfile
+#     path: "{{ remote_tmp_dir }}/lnfile"
+#   become: True
+#   register: result_lnfile
 
 # - name: Copy symlink to symlink
 #   docker_container_copy_out:
