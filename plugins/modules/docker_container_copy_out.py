@@ -572,8 +572,6 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
 def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1):
-    # TODO How can we know if tarfile.extractall() is going to create a new folder (vs just copying content into existing)? In this case, we need to set mode.
-    # See: - name: Copy directory that only contains a file to a directory that already exists and only contains a file
     # Always execute if force is True
     if force is True:
         return False
@@ -669,6 +667,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             # TODO If check mode, return None so that the file is not extracted
             # Derive path that file will be written to when expanded
             dst_member_path = os.path.join(dst_path, member.path)
+            log(client.module, f'{__file__}:{get_current_line_number()}:dst_path:{dst_path}:member.path:{member.path}:dst_member_path:{dst_member_path}')
             # Stat the managed path
             dst_member_stat = None
             try:
@@ -714,11 +713,10 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
 
-    # TODO What is the deal with file modes?
-    # TODO If the src is a single file, can we rename it?
-    # TODO Should we actually be iternally setting the dst_path or managed path to the parent of what was passed?
+    # TODO Q: If the src is a single file, can we rename it? A: NO! not right now
     # TODO Support diff mode
     # TODO Support check mode
+    # Q: If src is a directory but dst is a directory whose parent exists but the child does not, will it create the new directory (basically a rename, only for a dir)? A: Yes, it works.
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
     src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
@@ -767,6 +765,9 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             raise ValueError('member is not a TarInfo object')
         # TODO If check mode, return None so that the file is not extracted
         # Derive path that file will be written to when expanded
+        # TODO: We need some logic here to check whether this member is the ONLY member in the tar.
+        # TODO: If only member in the tar, then the path would be joined dst_path + last segment of managed_path.
+        # TODO: Unless last segment was a dot. In
         dst_member_path = os.path.join(dst_path, member.path)
         # Stat the managed path
         dst_member_stat = None
@@ -1201,7 +1202,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         container,
         # managed_path,
         dst_expand_path,
-        container_path_normalized, # Works with normalized path
+        container_path, # Does not work with normalized path. Needs the help of the dot.
         follow_links=follow_links,
         local_follow_links=local_follow_links,
         archive_mode=archive_mode,
@@ -1220,7 +1221,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             container,
             # managed_path,
             dst_expand_path,
-            container_path_normalized, # Works with normalized path
+            container_path, # Does not work with normalized path. Needs the help of the dot.
             follow_links=follow_links,
             local_follow_links=local_follow_links,
             archive_mode=archive_mode,
@@ -1288,7 +1289,7 @@ def main():
         supports_check_mode=True,
         # I don't think we need these to both be supplied at this point
         # required_together=[('owner_id', 'group_id')],
-        # TODO Make archive_mode and owner_id/group_id mutually exclusive?
+        # Make archive_mode and owner_id/group_id mutually exclusive
         mutually_exclusive=[('archive_mode', 'owner_id'),('archive_mode', 'group_id')]
     )
 
