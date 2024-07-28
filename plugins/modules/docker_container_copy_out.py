@@ -571,7 +571,7 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
     return False
 
 def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
-                       force=False, diff=None, max_file_size_for_diff=1):
+                       force=False, diff=None, max_file_size_for_diff=1, dst_override_member_path=None):
     # Always execute if force is True
     if force is True:
         return False
@@ -666,8 +666,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         for member in tar:
             # TODO If check mode, return None so that the file is not extracted
             # Derive path that file will be written to when expanded
-            dst_member_path = os.path.join(dst_path, member.path)
-            log(client.module, f'{__file__}:{get_current_line_number()}:dst_path:{dst_path}:member.path:{member.path}:dst_member_path:{dst_member_path}')
+            dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
             # Stat the managed path
             dst_member_stat = None
             try:
@@ -709,7 +708,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
 
 
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
-                       force=False, diff=None, max_file_size_for_diff=1):
+                       force=False, diff=None, max_file_size_for_diff=1,dst_override_member_path=None):
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
 
@@ -768,13 +767,14 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         # TODO: We need some logic here to check whether this member is the ONLY member in the tar.
         # TODO: If only member in the tar, then the path would be joined dst_path + last segment of managed_path.
         # TODO: Unless last segment was a dot. In
-        dst_member_path = os.path.join(dst_path, member.path)
+        dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
         # Stat the managed path
         dst_member_stat = None
         try:
             dst_member_stat = stat_managed_file(dst_member_path)
         except FileNotFoundError:
             pass
+        log(client.module, f'{__file__}:{get_current_line_number()}:dst_path:{dst_path}:member.path:{member.path}:dst_member_path:{dst_member_path}')
         # Check force settings first
         if dst_member_stat is not None and force is False:
             return None
@@ -784,6 +784,7 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         member.gid = group_id_to_use
         member.uid = user_id_to_use
         member.mode = mode_to_use
+        member.path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else member.path
         # This is returning the correct values, but looks like unless `become: True` specified, will silently fail and not change UID/GID.
         # Added validation at front of module to ensure we are super user.
         return member
@@ -1086,13 +1087,17 @@ def is_file_idempotent(client, container, managed_path, container_path, follow_l
         follow_links=follow_links,
     )
 
-def determine_dst_expand_path(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+def determine_paths(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
+    paths = {
+        'src_stat_path': container_path,
+        'dst_expand_path': managed_path,
+        'dst_override_member_path': None,
+    }
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
     if not isinstance(managed_path, str):
         raise ValueError('managed_path must be instance of str')
-    dst_expand_path = managed_path
     # Throws an error if container file doesn't exist
     src_stat = stat_container_file(
         client,
@@ -1101,6 +1106,8 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
     )
     src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
     src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
+    if not isinstance(src_path, str):
+        raise ValueError('src_path must be instance of str')
     # Stat the local file
     dst_stat = None
     try:
@@ -1139,11 +1146,11 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
                 if container_path.endswith(f'{os.path.sep}.'):
                     # the content of the source directory is copied into this directory
                     # TODO: Does this need to be path after resolving symlinks?
-                    dst_expand_path = os.path.dirname(dst_path)
+                    paths['dst_expand_path'] = os.path.dirname(dst_path)
                 # SRC_PATH does not end with /. (that is: slash followed by dot)
                 else:
                     # the source directory is copied into this directory
-                    dst_expand_path = dst_path
+                    paths['dst_expand_path'] = dst_path
             # DEST_PATH exists and is a file (not a directory)
             else:
                 # Error condition: cannot copy a directory to a file
@@ -1151,28 +1158,34 @@ def determine_dst_expand_path(client, container, managed_path, container_path, f
         # DEST_PATH does not exist
         else:
             # DEST_PATH is created as a directory and the contents of the source directory are copied into this directory
-            dst_expand_path = dst_path
+            paths['dst_expand_path'] = dst_path
+            paths['src_stat_path'] = f'{src_path.rstrip(os.path.sep)}{os.path.sep}.'
     # ELSE SRC_PATH is NOT a directory (aka, specifies a regular file OR a no-follow symlink (even if symlink points to dir) OR a followed symlink to a regular file)
     else:
-        # DEST_PATH does not exist
-        if dst_stat_ultimate is None:
+        # DEST_PATH ends with "/"
+        if managed_path.endswith(os.path.sep):
             # DEST_PATH does not exist and ends with /
-            if managed_path.endswith(os.path.sep):
+            if dst_stat_ultimate is None:
                 # Error condition: the destination directory must exist.
-                raise FileNotFoundError('The destination directory must exist.')
+                raise FileNotFoundError(f'No such directory: {managed_path}')
+            if not stat.S_ISDIR(dst_stat_ultimate.st_mode):
+                # Error condition: the destination directory must exist.
+                raise ValueError(f'Not a directory: {managed_path}')
             # the file is saved to a file created at DEST_PATH
-            dst_expand_path = os.path.dirname(dst_path)
-        # DEST_PATH exists
+            paths['dst_expand_path'] = os.path.dirname(dst_path)
+        # DEST_PATH does not end with "/"
         else:
             # ...and is a directory OR a followed symlink to a directory
-            if stat.S_ISDIR(dst_stat_ultimate.st_mode):
+            if dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode):
                 # the file is copied into this directory using the basename from SRC_PATH
-                dst_expand_path = dst_path
+                paths['dst_expand_path'] = dst_path
             # ...and is a file (not a directory)
             else:
                 # the destination is overwritten with the source file's contents
-                dst_expand_path = os.path.dirname(dst_path)
-    return dst_expand_path
+                paths['dst_expand_path'] = os.path.dirname(dst_path)
+                # but we support changing the name of the file inside destination directory
+                paths['dst_override_member_path'] = os.path.basename(dst_path)
+    return paths
 
 
 def copy_file_out_of_container(client, container, managed_path, container_path, container_path_normalized, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
@@ -1181,7 +1194,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         diff = {}
     else:
         diff = None
-    dst_expand_path = determine_dst_expand_path(
+    paths = determine_paths(
         client,
         container,
         managed_path,
@@ -1200,9 +1213,9 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
     idempotent = is_idempotent(
         client,
         container,
-        # managed_path,
-        dst_expand_path,
-        container_path, # Does not work with normalized path. Needs the help of the dot.
+        paths['dst_expand_path'],
+        paths['src_stat_path'], # Does not work with normalized path. Needs the help of the dot.
+        dst_override_member_path=paths['dst_override_member_path'],
         follow_links=follow_links,
         local_follow_links=local_follow_links,
         archive_mode=archive_mode,
@@ -1219,9 +1232,9 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         copy(
             client,
             container,
-            # managed_path,
-            dst_expand_path,
-            container_path, # Does not work with normalized path. Needs the help of the dot.
+            paths['dst_expand_path'],
+            paths['src_stat_path'], # Does not work with normalized path. Needs the help of the dot.
+            dst_override_member_path=paths['dst_override_member_path'],
             follow_links=follow_links,
             local_follow_links=local_follow_links,
             archive_mode=archive_mode,
@@ -1309,7 +1322,7 @@ def main():
     if (archive_mode is True or owner_id is not None or group_id is not None) and not os.environ.get("SUDO_UID"):
         client.fail(f'The archive_mode, owner_id, and group_id parameters require running this module as a super user')
 
-    # TODO: Delegate this logic to only the function that needs to know (determine_dst_expand_path)
+    # TODO: Delegate this logic to only the function that needs to know (determine_paths)
     container_path_ends_in_dot = container_path.endswith(f'{os.path.sep}.')
     container_path_normalized = container_path
     try:
