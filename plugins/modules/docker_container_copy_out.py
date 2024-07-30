@@ -712,7 +712,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
 
-    # TODO Q: If the src is a single file, can we rename it? A: NO! not right now
     # TODO Support diff mode
     # TODO Support check mode
     # Q: If src is a directory but dst is a directory whose parent exists but the child does not, will it create the new directory (basically a rename, only for a dir)? A: Yes, it works.
@@ -764,9 +763,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             raise ValueError('member is not a TarInfo object')
         # TODO If check mode, return None so that the file is not extracted
         # Derive path that file will be written to when expanded
-        # TODO: We need some logic here to check whether this member is the ONLY member in the tar.
-        # TODO: If only member in the tar, then the path would be joined dst_path + last segment of managed_path.
-        # TODO: Unless last segment was a dot. In
         dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
         # Stat the managed path
         dst_member_stat = None
@@ -1131,10 +1127,7 @@ def determine_paths(client, container, managed_path, container_path, follow_link
 
     src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
     dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    # TODO LOGIC
-    # TODO Do we resolve symlinks before returning the dst_expand_path? I think we might need to because think how a single file would be expanded.
     # IF SRC_PATH is a directory (IF SRC_PATH specifies a directory OR a followed symlink to a directory)
-
     if container_mode_is_dir(src_stat_ultimate['mode']):
         # DEST_PATH exists
         if dst_stat_ultimate is not None:
@@ -1145,7 +1138,6 @@ def determine_paths(client, container, managed_path, container_path, follow_link
                 # However, be it noted that this is all we need to drive the behavior expected - we just need to set the dest expand path here.
                 if container_path.endswith(f'{os.path.sep}.'):
                     # the content of the source directory is copied into this directory
-                    # TODO: Does this need to be path after resolving symlinks?
                     paths['dst_expand_path'] = os.path.dirname(dst_path)
                 # SRC_PATH does not end with /. (that is: slash followed by dot)
                 else:
