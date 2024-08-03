@@ -570,11 +570,29 @@ def tarinfo_and_stat_result_are_same_filetype(tarinfo, stat_result):
 
     return False
 
+def tarinfo_to_rsync_itemized_filetype(tarinfo):
+    if not isinstance(tarinfo, tarfile.TarInfo):
+        raise ValueError(f'tarinfo must be instance of tarfile.TarInfo')
+    # f for a file, a d for a directory, an L for a symlink, a D for a device, and a S for a special file (e.g. named sockets and fifos).
+    # https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
+    if tarinfo.isreg():
+        return 'f'
+    if tarinfo.isdir():
+        return 'd'
+    if tarinfo.issym():
+        return 'L'
+    if tarinfo.islnk():
+        # hard link not allowed for directory
+        return 'f'
+    if tarinfo.isblk():
+        return 'D'
+    if tarinfo.isfifo():
+        return 's'
+
 def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
                        force=False, diff=None, max_file_size_for_diff=1, dst_override_member_path=None):
-    # Always execute if force is True
-    if force is True:
-        return False
+    # itemize: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes:~:text=The%20%22%25i%22%20escape%20has%20a%20cryptic%20output%20that%20is%2011%20letters%20long.%20The%20general%20format%20is%20like%20the%20string%20YXcstpoguax%2C%20where%20Y%20is%20replaced%20by%20the%20type%20of%20update%20being%20done%2C%20X%20is%20replaced%20by%20the%20file%2Dtype%2C%20and%20the%20other%20letters%20represent%20attributes%20that%20may%20be%20output%20if%20they%20are%20being%20modified.
+    is_idempotent = True
     src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
@@ -591,7 +609,9 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         # Does NOT resolve symlinks
         dst_stat = stat_managed_file(managed_path)
     except FileNotFoundError:
-        return False
+        is_idempotent = False
+        if diff is None:
+            return is_idempotent
 
     dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
     dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
@@ -619,9 +639,12 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
                     .format(container_path=container_path, container=container)
                 )
     if dst_stat_ultimate is None:
-        return False
+        is_idempotent = False
+        if diff is None:
+            return is_idempotent
 
     if tar_will_create_folder:
+        itemized = list('>%s.......??' % 'd')
         # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
         group_id_to_use = group_id if group_id is not None else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else os.getuid()
@@ -640,17 +663,28 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         #     src_size = src_stat_ultimate['size']
         #     return False
         # User
-        if group_id_to_use != dst_stat_ultimate.st_gid:
-            return False
-        # Group
         if user_id_to_use != dst_stat_ultimate.st_uid:
-            return False
+            is_idempotent = False
+            itemized[6] = 'o'
+            if diff is None:
+                return is_idempotent
+        # Group
+        if group_id_to_use != dst_stat_ultimate.st_gid:
+            is_idempotent = False
+            itemized[7] = 'g'
+            if diff is None:
+                return is_idempotent
         # Permissions
         # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
         # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
         # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
         if mode_to_use is not None and (dst_stat_ultimate.st_mode & 0o7777) != mode_to_use:
-            return False
+            is_idempotent = False
+            itemized[5] = 'p'
+            if diff is None:
+                return is_idempotent
+        if isinstance(diff, list):
+            diff.append('%s %s' % (''.join(itemized), dst_path))
 
     # Get the tar content of container_path
     try:
@@ -664,6 +698,8 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
 
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
         for member in tar:
+            is_member_idempotent = True
+            itemized = list('.........??')
             # TODO If check mode, return None so that the file is not extracted
             # Derive path that file will be written to when expanded
             dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
@@ -672,39 +708,65 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             try:
                 dst_member_stat = stat_managed_file(dst_member_path)
             except FileNotFoundError:
-                return False
-            # Check force settings first
-            if dst_member_stat is not None and force is False:
-                # Could still be idempotent
-                continue
-            group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
-            user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
-            mode_to_use = mode if mode is not None else member.mode
-            # Type
-            if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
-                return False
-            # User
-            if user_id_to_use != dst_member_stat.st_uid:
-                return False
-            # Group
-            if group_id_to_use != dst_member_stat.st_gid:
-                return False
-            # Permissions
-            if mode_to_use != (dst_member_stat.st_mode & 0o7777):
-                return False
-            # Size, Content - only compare if regular file
-            if stat.S_ISREG(dst_member_stat.st_mode) and member.isreg():
-                # Size
-                if member.size != dst_member_stat.st_size:
-                    return False
-                # Content
-                is_equal = True
-                member_io = tar.extractfile(member)
-                with open(dst_member_path, 'rb') as dst_member_io:
-                    is_equal = are_fileobjs_equal(member_io, dst_member_io)
-                if not is_equal:
-                    return False
-    return True
+                is_member_idempotent = False
+                if diff is None:
+                    return is_member_idempotent
+            if dst_member_stat is not None:
+                # Check force settings first
+                if force is not False:
+                    group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
+                    user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
+                    mode_to_use = mode if mode is not None else member.mode
+                    # Type
+                    if not tarinfo_and_stat_result_are_same_filetype(member, dst_member_stat):
+                        is_member_idempotent = False
+                        # map member filetype to one of: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes:~:text=The%20file%2Dtypes%20that%20replace%20the%20X%20are%3A%20f%20for%20a%20file%2C%20a%20d%20for%20a%20directory%2C%20an%20L%20for%20a%20symlink%2C%20a%20D%20for%20a%20device%2C%20and%20a%20S%20for%20a%20special%20file%20(e.g.%20named%20sockets%20and%20fifos).
+                        itemized[1] = tarinfo_to_rsync_itemized_filetype(member)
+                        if diff is None:
+                            return is_member_idempotent
+                    # User
+                    if user_id_to_use != dst_member_stat.st_uid:
+                        is_member_idempotent = False
+                        itemized[6] = 'o'
+                        if diff is None:
+                            return is_member_idempotent
+                    # Group
+                    if group_id_to_use != dst_member_stat.st_gid:
+                        is_member_idempotent = False
+                        itemized[7] = 'g'
+                        if diff is None:
+                            return is_member_idempotent
+                    # Permissions
+                    if mode_to_use != (dst_member_stat.st_mode & 0o7777):
+                        is_member_idempotent = False
+                        itemized[5] = 'p'
+                        if diff is None:
+                            return is_member_idempotent
+                    # Size, Content - only compare if regular file
+                    if stat.S_ISREG(dst_member_stat.st_mode) and member.isreg():
+                        # Size
+                        if member.size != dst_member_stat.st_size:
+                            is_member_idempotent = False
+                            itemized[3] = 's'
+                            if diff is None:
+                                return is_member_idempotent
+                        # Content
+                        is_content_equal = True
+                        member_io = tar.extractfile(member)
+                        with open(dst_member_path, 'rb') as dst_member_io:
+                            is_content_equal = are_fileobjs_equal(member_io, dst_member_io)
+                        if not is_content_equal:
+                            is_member_idempotent = False
+                            itemized[2] = 'c'
+                            if diff is None:
+                                return is_member_idempotent
+            if is_member_idempotent is False:
+                is_idempotent = False
+                itemized[0] = '>'
+                itemized[1] = tarinfo_to_rsync_itemized_filetype(member)
+            if isinstance(diff, list):
+                diff.append('%s %s' % (''.join(itemized), dst_member_path))
+    return is_idempotent
 
 
 def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
@@ -713,6 +775,26 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         raise ValueError('container_path must be instance of str')
 
     # TODO Support diff mode
+    # https://github.com/ansible/ansible/blob/738180d24091b459830ffae2c4f532a711aa2418/lib/ansible/modules/unarchive.py#L582
+    # https://blog.devops.dev/writing-ansible-modules-with-support-for-diff-mode-cae70de1c25f
+    # https://docs.ansible.com/ansible/latest/reference_appendices/common_return_values.html#diff
+    # Example: Successfully copied 164kB to /Users/andrewdawes/Desktop/test/.
+    # Diff mode includes: before_header, before, after_header, after
+    # We need to see what these elements look like for a regular Ansible modules like copy, or synchronize
+    # https://docs.ansible.com/ansible/latest/collections/ansible/posix/synchronize_module.html
+    # https://github.com/ansible/ansible/blob/738180d24091b459830ffae2c4f532a711aa2418/lib/ansible/modules/unarchive.py#L574
+    # TODO: For DIFF MODE, we want the output to look similar to rsync output
+    # The DIFF can just be a string where each file diff is separated as a newline from previous
+    # Definitive guide: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
+    # For examples: https://stackoverflow.com/questions/4493525/what-does-f-mean-in-rsync-logs
+    # STEP 1: Identify the file type and translate that to ftype string
+    # STEP 2: Build an "itemized" list with 11 elements where element 1 (0 based index) refers to filetype: itemized = list('.%s.......??' % ftype)
+    # itemized[2] = checksum change
+    # itemized[3] = size change
+    # itemized[4] = timestamp change
+    # itemized[5] = permissions change
+    # itemized[6] = ownership change
+    # itemized[6] = also group change?
     # TODO Support check mode
     # Q: If src is a directory but dst is a directory whose parent exists but the child does not, will it create the new directory (basically a rename, only for a dir)? A: Yes, it works.
     # Stat the container file (needed to determine if symlink and should follow)
@@ -1181,11 +1263,8 @@ def determine_paths(client, container, managed_path, container_path, follow_link
 
 
 def copy_file_out_of_container(client, container, managed_path, container_path, container_path_normalized, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
-                             owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
-    if diff:
-        diff = {}
-    else:
-        diff = None
+                             owner_id, group_id, mode, force=False, diff=None, max_file_size_for_diff=1):
+
     paths = determine_paths(
         client,
         container,
@@ -1198,7 +1277,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         group_id,
         mode,
         force=False,
-        diff=False,
+        diff=diff,
         max_file_size_for_diff=max_file_size_for_diff
     )
 
@@ -1220,7 +1299,7 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
     )
     changed = not idempotent
 
-    if changed and not client.module.check_mode:
+    if (changed or force) and not client.module.check_mode:
         copy(
             client,
             container,
@@ -1245,8 +1324,34 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         owner_id=owner_id,
         group_id=group_id,
     )
-    if diff:
-        result['diff'] = diff
+    # diff = [
+    #     '>f+++++++++',
+    #     '.f....og..x'
+    # ]
+    if isinstance(diff, list):
+        # result['diff'] = {
+        #         'before_header': 'before_headerA',
+        #         'before': 'beforeA',
+        #         'after_header': 'after_headerA',
+        #         'after': 'afterA',
+        #     }
+        result['diff'] = {
+            'prepared': "\n".join(diff)
+        }
+        # result['diff'] = [
+        #     {
+        #         'before_header': 'before_headerA',
+        #         'before': 'beforeA',
+        #         'after_header': 'after_headerA',
+        #         'after': 'afterA',
+        #     },
+        #     {
+        #         'before_header': 'before_headerB',
+        #         'before': 'beforeB',
+        #         'after_header': 'after_headerB',
+        #         'after': 'afterB',
+        #     }
+        # ]
     client.module.exit_json(**result)
 
 def mode_to_int_literal(mode):
@@ -1342,7 +1447,7 @@ def main():
             group_id=group_id,
             mode=mode,
             force=force,
-            diff=client.module._diff,
+            diff= list() if client.module._diff is not None else None,
             max_file_size_for_diff=max_file_size_for_diff,
         )
     except NotFound as exc:
