@@ -630,7 +630,7 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
 
     src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
     dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only
+    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
     # Compare the stats
     # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
     if src_stat_ultimate is None:
@@ -644,16 +644,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             return is_idempotent
 
     if tar_will_create_folder:
-        # Build an "itemized" list with 11 elements where element 1 (0 based index) refers to filetype: itemized = list('.%s.......??' % ftype)
-        # rsync: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
-        # For examples: https://stackoverflow.com/questions/4493525/what-does-f-mean-in-rsync-logs
-        # itemized[2] = checksum change
-        # itemized[3] = size change
-        # itemized[4] = timestamp change
-        # itemized[5] = permissions change
-        # itemized[6] = ownership change
-        # itemized[6] = also group change?
-        itemized = list('>%s.......??' % 'd')
         # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
         group_id_to_use = group_id if group_id is not None else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else os.getuid()
@@ -674,13 +664,11 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         # User
         if user_id_to_use != dst_stat_ultimate.st_uid:
             is_idempotent = False
-            itemized[6] = 'o'
             if diff is None:
                 return is_idempotent
         # Group
         if group_id_to_use != dst_stat_ultimate.st_gid:
             is_idempotent = False
-            itemized[7] = 'g'
             if diff is None:
                 return is_idempotent
         # Permissions
@@ -689,11 +677,9 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
         if mode_to_use is not None and (dst_stat_ultimate.st_mode & 0o7777) != mode_to_use:
             is_idempotent = False
-            itemized[5] = 'p'
             if diff is None:
                 return is_idempotent
-        if isinstance(diff, list):
-            diff.append('%s %s' % (''.join(itemized), dst_path))
+
 
     # Get the tar content of container_path
     try:
@@ -708,6 +694,15 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
     with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
         for member in tar:
             is_member_idempotent = True
+            # Build an "itemized" list with 11 elements where element 1 (0 based index) refers to filetype: itemized = list('.%s.......??' % ftype)
+            # rsync: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
+            # For examples: https://stackoverflow.com/questions/4493525/what-does-f-mean-in-rsync-logs
+            # itemized[2] = checksum change
+            # itemized[3] = size change
+            # itemized[4] = timestamp change
+            # itemized[5] = permissions change
+            # itemized[6] = ownership change
+            # itemized[6] = also group change?
             itemized = list('.........??')
             # Derive path that file will be written to when expanded
             dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
@@ -773,7 +768,9 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
                 itemized[0] = '>'
                 itemized[1] = tarinfo_to_rsync_itemized_filetype(member)
             if isinstance(diff, list):
-                diff.append('%s %s' % (''.join(itemized), dst_member_path))
+                # diff.append('%s %s' % (''.join(itemized), dst_member_path))
+                diff.append('%s %s' % (''.join(itemized), member.path))
+
     return is_idempotent
 
 
@@ -814,7 +811,7 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             pass
     src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
     dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only
+    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
     # Get the tar content of container_path
     try:
         stream = client.get_raw_stream(
@@ -836,7 +833,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
             dst_member_stat = stat_managed_file(dst_member_path)
         except FileNotFoundError:
             pass
-        log(client.module, f'{__file__}:{get_current_line_number()}:dst_path:{dst_path}:member.path:{member.path}:dst_member_path:{dst_member_path}')
         # Check force settings first
         if dst_member_stat is not None and force is False:
             return None
