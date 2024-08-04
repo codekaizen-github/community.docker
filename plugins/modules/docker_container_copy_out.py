@@ -644,6 +644,15 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
             return is_idempotent
 
     if tar_will_create_folder:
+        # Build an "itemized" list with 11 elements where element 1 (0 based index) refers to filetype: itemized = list('.%s.......??' % ftype)
+        # rsync: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
+        # For examples: https://stackoverflow.com/questions/4493525/what-does-f-mean-in-rsync-logs
+        # itemized[2] = checksum change
+        # itemized[3] = size change
+        # itemized[4] = timestamp change
+        # itemized[5] = permissions change
+        # itemized[6] = ownership change
+        # itemized[6] = also group change?
         itemized = list('>%s.......??' % 'd')
         # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
         group_id_to_use = group_id if group_id is not None else os.getgid()
@@ -700,7 +709,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         for member in tar:
             is_member_idempotent = True
             itemized = list('.........??')
-            # TODO If check mode, return None so that the file is not extracted
             # Derive path that file will be written to when expanded
             dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
             # Stat the managed path
@@ -773,29 +781,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
                        force=False, diff=None, max_file_size_for_diff=1,dst_override_member_path=None):
     if not isinstance(container_path, str):
         raise ValueError('container_path must be instance of str')
-
-    # TODO Support diff mode
-    # https://github.com/ansible/ansible/blob/738180d24091b459830ffae2c4f532a711aa2418/lib/ansible/modules/unarchive.py#L582
-    # https://blog.devops.dev/writing-ansible-modules-with-support-for-diff-mode-cae70de1c25f
-    # https://docs.ansible.com/ansible/latest/reference_appendices/common_return_values.html#diff
-    # Example: Successfully copied 164kB to /Users/andrewdawes/Desktop/test/.
-    # Diff mode includes: before_header, before, after_header, after
-    # We need to see what these elements look like for a regular Ansible modules like copy, or synchronize
-    # https://docs.ansible.com/ansible/latest/collections/ansible/posix/synchronize_module.html
-    # https://github.com/ansible/ansible/blob/738180d24091b459830ffae2c4f532a711aa2418/lib/ansible/modules/unarchive.py#L574
-    # TODO: For DIFF MODE, we want the output to look similar to rsync output
-    # The DIFF can just be a string where each file diff is separated as a newline from previous
-    # Definitive guide: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes
-    # For examples: https://stackoverflow.com/questions/4493525/what-does-f-mean-in-rsync-logs
-    # STEP 1: Identify the file type and translate that to ftype string
-    # STEP 2: Build an "itemized" list with 11 elements where element 1 (0 based index) refers to filetype: itemized = list('.%s.......??' % ftype)
-    # itemized[2] = checksum change
-    # itemized[3] = size change
-    # itemized[4] = timestamp change
-    # itemized[5] = permissions change
-    # itemized[6] = ownership change
-    # itemized[6] = also group change?
-    # TODO Support check mode
     # Q: If src is a directory but dst is a directory whose parent exists but the child does not, will it create the new directory (basically a rename, only for a dir)? A: Yes, it works.
     # Stat the container file (needed to determine if symlink and should follow)
     # Throws an error if container file doesn't exist
@@ -843,7 +828,6 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
     def tar_filter(member, path):
         if not isinstance(member, tarfile.TarInfo):
             raise ValueError('member is not a TarInfo object')
-        # TODO If check mode, return None so that the file is not extracted
         # Derive path that file will be written to when expanded
         dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
         # Stat the managed path
@@ -1324,34 +1308,10 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         owner_id=owner_id,
         group_id=group_id,
     )
-    # diff = [
-    #     '>f+++++++++',
-    #     '.f....og..x'
-    # ]
     if isinstance(diff, list):
-        # result['diff'] = {
-        #         'before_header': 'before_headerA',
-        #         'before': 'beforeA',
-        #         'after_header': 'after_headerA',
-        #         'after': 'afterA',
-        #     }
         result['diff'] = {
             'prepared': "\n".join(diff)
         }
-        # result['diff'] = [
-        #     {
-        #         'before_header': 'before_headerA',
-        #         'before': 'beforeA',
-        #         'after_header': 'after_headerA',
-        #         'after': 'afterA',
-        #     },
-        #     {
-        #         'before_header': 'before_headerB',
-        #         'before': 'beforeB',
-        #         'after_header': 'after_headerB',
-        #         'after': 'afterB',
-        #     }
-        # ]
     client.module.exit_json(**result)
 
 def mode_to_int_literal(mode):
