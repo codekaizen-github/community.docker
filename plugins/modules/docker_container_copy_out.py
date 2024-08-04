@@ -9,6 +9,14 @@ import tarfile
 __metaclass__ = type
 
 
+# TODO: Identify any functions/methods that were edited/added in outside reused code
+# TODO: Can these be moved back into this module? Reduce dependence, changes.
+# TODO: If not, isolate as much as possible
+# TODO: Refactor for organization's sake here
+# TODO: Optimize for performance's sake here
+# TODO: Check on test statuses
+# TODO: Submit PR
+
 DOCUMENTATION = '''
 ---
 module: docker_container_copy_out
