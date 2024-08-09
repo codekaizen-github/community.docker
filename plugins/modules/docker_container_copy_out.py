@@ -10,11 +10,23 @@ import tarfile
 __metaclass__ = type
 
 
-# TODO: Identify any functions/methods that were edited/added in outside reused code
-# TODO: Can these be moved back into this module? Reduce dependence, changes.
-# TODO: If not, isolate as much as possible
 # TODO: Refactor for organization's sake here
 # TODO: Optimize for performance's sake here
+# Method invokations to either memoize or pass results as params
+# stat_container_file()
+# container_mode_is_symlink()
+# stat_container_file_resolve_symlinks()
+# managed_stat_data_mode_is_symlink()
+# stat_managed_file()
+# Derived variables to pass around
+# src_path
+# dst_path
+# dst_stat_follow_links
+# src_stat_follow_links
+# src_stat_ultimate
+# dst_stat_ultimate
+# tar_will_create_folder
+#
 # TODO: Check on test statuses
 # TODO: Submit PR
 
@@ -37,8 +49,6 @@ attributes:
     support: full
     details:
       - Additional data will need to be transferred to compute diffs.
-      - The module uses R(the MAX_FILE_SIZE_FOR_DIFF ansible-core configuration,MAX_FILE_SIZE_FOR_DIFF)
-        to determine for how large files diffs should be computed.
 
 options:
   container:
@@ -191,8 +201,6 @@ from ansible_collections.community.docker.plugins.module_utils.copy import (
     DockerUnexpectedError,
     _stream_generator_to_fileobj,
 )
-
-from ansible_collections.community.docker.plugins.module_utils._scramble import generate_insecure_key, scramble
 
 import datetime
 
@@ -481,55 +489,12 @@ def tarinfo_to_rsync_itemized_filetype(tarinfo):
     if tarinfo.isfifo():
         return 's'
 
-def is_idempotent(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
-                       force=False, diff=None, max_file_size_for_diff=1, dst_override_member_path=None):
+def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src_path, dst_path, dst_stat_ultimate, tar_will_create_folder,
+                       force=False, diff=None, dst_override_member_path=None):
+    log(client.module, f'{__file__}:{get_current_line_number()}: archive_mode: {archive_mode}, owner_id: {owner_id}, group_id: {group_id}, mode: {mode}, src_path: {src_path}, dest_path: {dst_path}')
     # itemize: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes:~:text=The%20%22%25i%22%20escape%20has%20a%20cryptic%20output%20that%20is%2011%20letters%20long.%20The%20general%20format%20is%20like%20the%20string%20YXcstpoguax%2C%20where%20Y%20is%20replaced%20by%20the%20type%20of%20update%20being%20done%2C%20X%20is%20replaced%20by%20the%20file%2Dtype%2C%20and%20the%20other%20letters%20represent%20attributes%20that%20may%20be%20output%20if%20they%20are%20being%20modified.
     is_idempotent = True
-    src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
-    # Stat the container file (needed to determine if symlink and should follow)
-    # Throws an error if container file doesn't exist
-    src_stat = stat_container_file(
-        client,
-        container,
-        in_path=container_path,
-    )
-    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
-    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
-    # Stat the local file
-    dst_stat = None
-    try:
-        # Does NOT resolve symlinks
-        dst_stat = stat_managed_file(managed_path)
-    except FileNotFoundError:
-        is_idempotent = False
-        if diff is None:
-            return is_idempotent
-
-    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
-    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
-    # If follow_links, then we want to get the real path of the file in the container
-    src_stat_follow_links = None
-    if src_is_followed_symlink:
-        # Will throw error if file does not exist
-        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
-    # If follow_links, then we want to get the real path of the file on managed node
-    dst_stat_follow_links = None
-    if dst_is_followed_symlink:
-        try:
-            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-        except FileNotFoundError:
-            pass
-
-    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
-    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
-    # Compare the stats
-    # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
-    if src_stat_ultimate is None:
-        raise DockerFileNotFound(
-                    'File {container_path} does not exist in container {container}'
-                    .format(container_path=container_path, container=container)
-                )
+    # Stat the local files
     if dst_stat_ultimate is None:
         is_idempotent = False
         if diff is None:
@@ -540,7 +505,6 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
         group_id_to_use = group_id if group_id is not None else os.getgid()
         user_id_to_use = owner_id if owner_id is not None else os.getuid()
         mode_to_use = mode
-        src_stat_ultimate_mode = src_stat_ultimate['mode']
         # | File Type | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
         # | 4 bits    | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
         # Unfortunately, cannot detect file type from the stat results
@@ -660,50 +624,13 @@ def is_idempotent(client, container, managed_path, container_path, follow_links,
                 itemized[0] = '>'
                 itemized[1] = tarinfo_to_rsync_itemized_filetype(member)
             if isinstance(diff, list):
-                # diff.append('%s %s' % (''.join(itemized), dst_member_path))
                 diff.append('%s %s' % (''.join(itemized), member.path))
 
     return is_idempotent
 
 
-def copy(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode, owner_id, group_id, mode,
-                       force=False, diff=None, max_file_size_for_diff=1,dst_override_member_path=None):
-    if not isinstance(container_path, str):
-        raise ValueError('container_path must be instance of str')
-    # Q: If src is a directory but dst is a directory whose parent exists but the child does not, will it create the new directory (basically a rename, only for a dir)? A: Yes, it works.
-    # Stat the container file (needed to determine if symlink and should follow)
-    # Throws an error if container file doesn't exist
-    src_stat_copy_dir_files_only = container_path.endswith(f'{os.path.sep}.')
-    src_stat = stat_container_file(
-        client,
-        container,
-        in_path=container_path,
-    )
-    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
-    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
-    # Stat the local file
-    dst_stat = None
-    try:
-        dst_stat = stat_managed_file(managed_path)
-    except FileNotFoundError:
-        pass
-    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
-    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
-    # If follow_links, then we want to get the real path of the file in the container
-    src_stat_follow_links = None
-    if src_is_followed_symlink:
-        # Will throw error if file does not exist
-        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
-    # If follow_links, then we want to get the real path of the file on managed node
-    dst_stat_follow_links = None
-    if dst_is_followed_symlink:
-        try:
-            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-        except FileNotFoundError:
-            pass
-    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
-    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
+def copy(client, container, managed_path, archive_mode, owner_id, group_id, mode,  src_path, dst_path, tar_will_create_folder,
+                       force=False, dst_override_member_path=None):
     # Get the tar content of container_path
     try:
         stream = client.get_raw_stream(
@@ -752,8 +679,7 @@ def copy(client, container, managed_path, container_path, follow_links, local_fo
         if mode_to_use is not None:
             os.chmod(managed_path, mode_to_use)
 
-def determine_paths(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
-                            owner_id, group_id, mode, force=False, diff=False, max_file_size_for_diff=1):
+def determine_paths(client, container, managed_path, container_path, follow_links, local_follow_links):
     paths = {
         'src_stat_path': container_path,
         'dst_expand_path': managed_path,
@@ -803,7 +729,6 @@ def determine_paths(client, container, managed_path, container_path, follow_link
             # DEST_PATH exists and is a directory
             if stat.S_ISDIR(dst_stat_ultimate.st_mode):
                 # SRC_PATH does end with /. (that is: slash followed by dot)
-                # TODO - Figure out a better way to pass this argument around.
                 # However, be it noted that this is all we need to drive the behavior expected - we just need to set the dest expand path here.
                 if container_path.endswith(f'{os.path.sep}.'):
                     # the content of the source directory is copied into this directory
@@ -849,40 +774,76 @@ def determine_paths(client, container, managed_path, container_path, follow_link
     return paths
 
 
-def copy_file_out_of_container(client, container, managed_path, container_path, container_path_normalized, container_path_ends_in_dot, follow_links, local_follow_links, archive_mode,
-                             owner_id, group_id, mode, force=False, diff=None, max_file_size_for_diff=1):
+def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+                             owner_id, group_id, mode, force=False, diff=None):
+
+    if not isinstance(container_path, str):
+        raise ValueError('container_path must be instance of str')
 
     paths = determine_paths(
         client,
         container,
         managed_path,
-        container_path, # Requires knowledge of whether a "dot" was used
+        container_path,
         follow_links,
         local_follow_links,
-        archive_mode,
-        owner_id,
-        group_id,
-        mode,
-        force=False,
-        diff=diff,
-        max_file_size_for_diff=max_file_size_for_diff
     )
+
+
+    src_stat_copy_dir_files_only = paths['src_stat_path'].endswith(f'{os.path.sep}.')
+    src_stat = stat_container_file(
+        client,
+        container,
+        in_path=paths['src_stat_path'],
+    )
+    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
+    src_path = src_stat['linkTarget'] if src_is_followed_symlink else paths['src_stat_path']
+    # Stat the local file
+    dst_stat = None
+    try:
+        dst_stat = stat_managed_file(paths['dst_expand_path'])
+    except FileNotFoundError:
+        pass
+    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
+    dst_path = os.readlink(paths['dst_expand_path']) if dst_is_followed_symlink else paths['dst_expand_path']
+    # If follow_links, then we want to get the real path of the file in the container
+    src_stat_follow_links = None
+    if src_is_followed_symlink:
+        # Will throw error if file does not exist
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=paths['src_stat_path'])
+    # If follow_links, then we want to get the real path of the file on managed node
+    dst_stat_follow_links = None
+    if dst_is_followed_symlink:
+        try:
+            dst_stat_follow_links = stat_managed_file_resolve_symlinks(paths['dst_expand_path'])
+        except FileNotFoundError:
+            pass
+    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
+    # Compare the stats
+    # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
+    if src_stat_ultimate is None:
+        raise DockerFileNotFound(
+                    'File {container_path} does not exist in container {container}'
+                    .format(container_path=container_path, container=container)
+                )
+    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
+    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
+
 
     idempotent = is_idempotent(
         client,
         container,
-        paths['dst_expand_path'],
-        paths['src_stat_path'], # Does not work with normalized path. Needs the help of the dot.
-        dst_override_member_path=paths['dst_override_member_path'],
-        follow_links=follow_links,
-        local_follow_links=local_follow_links,
-        archive_mode=archive_mode,
-        owner_id=owner_id,
-        group_id=group_id,
-        mode=mode,
+        archive_mode,
+        owner_id,
+        group_id,
+        mode,
+        src_path,
+        dst_path,
+        dst_stat_ultimate,
+        tar_will_create_folder,
         force=force,
         diff=diff,
-        max_file_size_for_diff=max_file_size_for_diff,
+        dst_override_member_path=paths['dst_override_member_path'],
     )
     changed = not idempotent
 
@@ -891,17 +852,15 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             client,
             container,
             paths['dst_expand_path'],
-            paths['src_stat_path'], # Does not work with normalized path. Needs the help of the dot.
-            dst_override_member_path=paths['dst_override_member_path'],
-            follow_links=follow_links,
-            local_follow_links=local_follow_links,
-            archive_mode=archive_mode,
-            owner_id=owner_id,
-            group_id=group_id,
-            mode=mode,
+            archive_mode,
+            owner_id,
+            group_id,
+            mode,
+            src_path,
+            dst_path,
+            tar_will_create_folder=tar_will_create_folder,
             force=force,
-            diff=diff,
-            max_file_size_for_diff=max_file_size_for_diff,
+            dst_override_member_path=paths['dst_override_member_path'],
         )
     result = dict(
         changed=changed,
@@ -952,16 +911,12 @@ def main():
         group_id=dict(type='int'),
         mode=dict(type='str'),
         force=dict(type='bool'),
-        # Undocumented parameters for use by the action plugin
-        _max_file_size_for_diff=dict(type='int'),
     )
 
     client = AnsibleDockerClient(
         argument_spec=argument_spec,
         min_docker_api_version='1.20',
         supports_check_mode=True,
-        # I don't think we need these to both be supplied at this point
-        # required_together=[('owner_id', 'group_id')],
         # Make archive_mode and owner_id/group_id mutually exclusive
         mutually_exclusive=[('archive_mode', 'owner_id'),('archive_mode', 'group_id')]
     )
@@ -976,19 +931,11 @@ def main():
     group_id = client.module.params['group_id']
     mode = client.module.params['mode']
     force = client.module.params['force']
-    max_file_size_for_diff = client.module.params['_max_file_size_for_diff'] or 1
 
     # Check whether user is super user if archive_mode, owner_id, or group_id are specified.
     if (archive_mode is True or owner_id is not None or group_id is not None) and not os.environ.get("SUDO_UID"):
         client.fail(f'The archive_mode, owner_id, and group_id parameters require running this module as a super user')
 
-    # TODO: Delegate this logic to only the function that needs to know (determine_paths)
-    container_path_ends_in_dot = container_path.endswith(f'{os.path.sep}.')
-    container_path_normalized = container_path
-    try:
-        container_path_normalized = normalize_container_path_to_abspath(container_path)
-    except ValueError as exc:
-        client.fail(to_native(exc))
 
     try:
         mode = mode_to_int_literal(mode)
@@ -1001,8 +948,6 @@ def main():
             container,
             managed_path,
             container_path,
-            container_path_normalized,
-            container_path_ends_in_dot,
             follow_links=follow,
             local_follow_links=local_follow,
             archive_mode=archive_mode,
@@ -1011,7 +956,6 @@ def main():
             mode=mode,
             force=force,
             diff= list() if client.module._diff is not None else None,
-            max_file_size_for_diff=max_file_size_for_diff,
         )
     except NotFound as exc:
         client.fail('Could not find container "{1}" or resource in it ({0})'.format(exc, container))
