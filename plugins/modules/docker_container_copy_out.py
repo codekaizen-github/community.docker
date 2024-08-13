@@ -679,7 +679,7 @@ def copy(client, container, managed_path, archive_mode, owner_id, group_id, mode
         if mode_to_use is not None:
             os.chmod(managed_path, mode_to_use)
 
-def determine_paths(client, container, managed_path, container_path, follow_links, local_follow_links):
+def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, dst_path, dst_stat_ultimate):
     paths = {
         'src_stat_path': container_path,
         'dst_expand_path': managed_path,
@@ -689,39 +689,6 @@ def determine_paths(client, container, managed_path, container_path, follow_link
         raise ValueError('container_path must be instance of str')
     if not isinstance(managed_path, str):
         raise ValueError('managed_path must be instance of str')
-    # Throws an error if container file doesn't exist
-    src_stat = stat_container_file(
-        client,
-        container,
-        in_path=container_path,
-    )
-    src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
-    src_path = src_stat['linkTarget'] if src_is_followed_symlink else container_path
-    if not isinstance(src_path, str):
-        raise ValueError('src_path must be instance of str')
-    # Stat the local file
-    dst_stat = None
-    try:
-        dst_stat = stat_managed_file(managed_path)
-    except FileNotFoundError:
-        pass
-    dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
-    dst_path = os.readlink(managed_path) if dst_is_followed_symlink else managed_path
-    # If follow_links, then we want to get the real path of the file in the container
-    src_stat_follow_links = None
-    if src_is_followed_symlink:
-        # Will throw error if file does not exist
-        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=container_path)
-    # If follow_links, then we want to get the real path of the file on managed node
-    dst_stat_follow_links = None
-    if dst_is_followed_symlink:
-        try:
-            dst_stat_follow_links = stat_managed_file_resolve_symlinks(managed_path)
-        except FileNotFoundError:
-            pass
-
-    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
-    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
     # IF SRC_PATH is a directory (IF SRC_PATH specifies a directory OR a followed symlink to a directory)
     if container_mode_is_dir(src_stat_ultimate['mode']):
         # DEST_PATH exists
@@ -773,49 +740,34 @@ def determine_paths(client, container, managed_path, container_path, follow_link
                 paths['dst_override_member_path'] = os.path.basename(dst_path)
     return paths
 
-
-def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
-                             owner_id, group_id, mode, force=False, diff=None):
-
-    if not isinstance(container_path, str):
-        raise ValueError('container_path must be instance of str')
-
-    paths = determine_paths(
-        client,
-        container,
-        managed_path,
-        container_path,
-        follow_links,
-        local_follow_links,
-    )
-
-
-    src_stat_copy_dir_files_only = paths['src_stat_path'].endswith(f'{os.path.sep}.')
+def determine_stats(client, container, src_stat_path,
+dst_expand_path, follow_links, local_follow_links):
+    src_stat_copy_dir_files_only = src_stat_path.endswith(f'{os.path.sep}.')
     src_stat = stat_container_file(
         client,
         container,
-        in_path=paths['src_stat_path'],
+        in_path=src_stat_path,
     )
     src_is_followed_symlink = (container_mode_is_symlink(src_stat['mode']) and follow_links)
-    src_path = src_stat['linkTarget'] if src_is_followed_symlink else paths['src_stat_path']
+    src_path = src_stat['linkTarget'] if src_is_followed_symlink else src_stat_path
     # Stat the local file
     dst_stat = None
     try:
-        dst_stat = stat_managed_file(paths['dst_expand_path'])
+        dst_stat = stat_managed_file(dst_expand_path)
     except FileNotFoundError:
         pass
     dst_is_followed_symlink = (managed_stat_data_mode_is_symlink(dst_stat.st_mode) and local_follow_links) if dst_stat is not None else False
-    dst_path = os.readlink(paths['dst_expand_path']) if dst_is_followed_symlink else paths['dst_expand_path']
+    dst_path = os.readlink(dst_expand_path) if dst_is_followed_symlink else dst_expand_path
     # If follow_links, then we want to get the real path of the file in the container
     src_stat_follow_links = None
     if src_is_followed_symlink:
         # Will throw error if file does not exist
-        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=paths['src_stat_path'])
+        src_stat_follow_links = stat_container_file_resolve_symlinks(client, container, in_path=src_stat_path)
     # If follow_links, then we want to get the real path of the file on managed node
     dst_stat_follow_links = None
     if dst_is_followed_symlink:
         try:
-            dst_stat_follow_links = stat_managed_file_resolve_symlinks(paths['dst_expand_path'])
+            dst_stat_follow_links = stat_managed_file_resolve_symlinks(dst_expand_path)
         except FileNotFoundError:
             pass
     src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
@@ -823,12 +775,54 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
     # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
     if src_stat_ultimate is None:
         raise DockerFileNotFound(
-                    'File {container_path} does not exist in container {container}'
-                    .format(container_path=container_path, container=container)
+                    'File {src_stat_path} does not exist in container {container}'
+                    .format(src_stat_path=src_stat_path, container=container)
                 )
     dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
     tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
+    return {
+        'src_stat': src_stat,
+        'src_path': src_path,
+        'src_stat_ultimate': src_stat_ultimate,
+        'dst_stat': dst_stat,
+        'dst_path': dst_path,
+        'dst_stat_ultimate': dst_stat_ultimate,
+        'tar_will_create_folder': tar_will_create_folder,
+    }
 
+
+
+def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
+                             owner_id, group_id, mode, force=False, diff=None):
+
+    if not isinstance(container_path, str):
+        raise ValueError('container_path must be instance of str')
+
+    stats = determine_stats(
+        client,
+        container,
+        container_path,
+        managed_path,
+        follow_links,
+        local_follow_links,
+    )
+    paths = determine_paths(
+        managed_path,
+        container_path,
+        stats['src_path'],
+        stats['src_stat_ultimate'],
+        stats['dst_path'],
+        stats['dst_stat_ultimate'],
+    )
+
+    ultimate_stats = determine_stats(
+        client,
+        container,
+        paths['src_stat_path'],
+        paths['dst_expand_path'],
+        follow_links,
+        local_follow_links,
+    )
 
     idempotent = is_idempotent(
         client,
@@ -837,10 +831,10 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         owner_id,
         group_id,
         mode,
-        src_path,
-        dst_path,
-        dst_stat_ultimate,
-        tar_will_create_folder,
+        ultimate_stats['src_path'],
+        ultimate_stats['dst_path'],
+        ultimate_stats['dst_stat_ultimate'],
+        ultimate_stats['tar_will_create_folder'],
         force=force,
         diff=diff,
         dst_override_member_path=paths['dst_override_member_path'],
@@ -856,9 +850,9 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             owner_id,
             group_id,
             mode,
-            src_path,
-            dst_path,
-            tar_will_create_folder=tar_will_create_folder,
+            ultimate_stats['src_path'],
+            ultimate_stats['dst_path'],
+            tar_will_create_folder=ultimate_stats['tar_will_create_folder'],
             force=force,
             dst_override_member_path=paths['dst_override_member_path'],
         )
