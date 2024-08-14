@@ -17,16 +17,6 @@ __metaclass__ = type
 # container_mode_is_symlink()
 # stat_container_file_resolve_symlinks()
 # managed_stat_data_mode_is_symlink()
-# stat_managed_file()
-# Derived variables to pass around
-# src_path
-# dst_path
-# dst_stat_follow_links
-# src_stat_follow_links
-# src_stat_ultimate
-# dst_stat_ultimate
-# tar_will_create_folder
-#
 # TODO: Check on test statuses
 # TODO: Submit PR
 
@@ -47,8 +37,6 @@ attributes:
     support: full
   diff_mode:
     support: full
-    details:
-      - Additional data will need to be transferred to compute diffs.
 
 options:
   container:
@@ -58,7 +46,7 @@ options:
     required: true
   path:
     description:
-      - Path to a file on the managed node.
+      - Path on the managed node to copy the file to.
     type: path
   container_path:
     description:
@@ -137,8 +125,8 @@ EXAMPLES = '''
 - name: Copy a file out of a container
     community.docker.docker_container_copy_out:
         container: mydata
-        path: /tmp/test_out.txt
         container_path: /tmp/test.txt
+        path: /tmp/test_out.txt
 
 - name: Copy a file out of a container with owner, group, and mode set
   community.docker.docker_container_copy_out:
@@ -147,7 +135,7 @@ EXAMPLES = '''
     container_path: /tmp/test.txt
     owner_id: 0  # root
     group_id: 0  # root
-    mode: 0o755  # readable and executable by all users, writable by root
+    mode: '0755'  # readable and executable by all users, writable by root
 '''
 
 RETURN = '''
@@ -167,18 +155,6 @@ managed_path:
     description:
         - The path of the file on the managed node.
     type: path
-mode:
-    description:
-        - The file mode of the copied file.
-    type: int
-owner_id:
-    description:
-        - The owner ID of the copied file.
-    type: int
-group_id:
-    description:
-        - The group ID of the copied file.
-    type: int
 '''
 
 import base64
@@ -213,7 +189,7 @@ def get_current_line_number():
 def log(module, msg):
     # Get a timestamp
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    timestamped_msg = f'{timestamp}: docker_container_copy_out: {msg}'
+    timestamped_msg = f'{timestamp}: {msg}'
     module.log(timestamped_msg)
 
 def stat_data_mode_is_symlink(mode):
@@ -369,7 +345,6 @@ def container_mode_is_char_device(mode):
 def container_mode_is_irregular(mode):
     return container_mode_is(mode, CONTAINER_MODE_BIT_IRREGULAR)
 
-
 def are_fileobjs_equal(f1, f2):
     '''Given two (buffered) file objects, compare their contents.'''
     blocksize = 65536
@@ -399,7 +374,6 @@ def are_fileobjs_equal(f1, f2):
             return False
         b1buf = b1buf[buflen:]
         b2buf = b2buf[buflen:]
-
 
 def stat_container_file(client, container, in_path):
     """Fetch information on a file from a Docker container.
@@ -489,13 +463,70 @@ def tarinfo_to_rsync_itemized_filetype(tarinfo):
     if tarinfo.isfifo():
         return 's'
 
-def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src_path, dst_path, dst_stat_ultimate, tar_will_create_folder,
+def normalize_container_path_to_abspath(path):
+    if not isinstance(path, str):
+        raise ValueError('Path "{0}" is not a valid path'.format(path))
+    if not path.startswith(os.path.sep):
+        path = os.path.join(os.path.sep, path)
+    path = os.path.normpath(path)
+    return path
+
+def copy(client, container, managed_path, archive_mode, owner_id, group_id, mode,  src_path, dst_path, tar_will_create_folder,
+                       force=False, dst_override_member_path=None):
+    # Get the tar content of container_path
+    try:
+        stream = client.get_raw_stream(
+            '/containers/{0}/archive'.format(container),
+            params={'path': src_path},
+            headers={'Accept-Encoding': 'identity'},
+        )
+    except NotFound:
+        raise DockerFileNotFound('File {0} does not exist in container {1}'.format(src_path, container))
+
+    def tar_filter(member, path):
+        if not isinstance(member, tarfile.TarInfo):
+            raise ValueError('member is not a TarInfo object')
+        # Derive path that file will be written to when expanded
+        dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
+        # Stat the managed path
+        dst_member_stat = None
+        try:
+            dst_member_stat = stat_managed_file(dst_member_path)
+        except FileNotFoundError:
+            pass
+        # Check force settings first
+        if dst_member_stat is not None and force is False:
+            return None
+        group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
+        user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
+        mode_to_use = mode if mode is not None else member.mode
+        member.gid = group_id_to_use
+        member.uid = user_id_to_use
+        member.mode = mode_to_use
+        member.path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else member.path
+        # This is returning the correct values, but looks like unless `become: True` specified, will silently fail and not change UID/GID.
+        # Added validation at front of module to ensure we are super user.
+        return member
+
+    with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
+        # Foreach member
+        tar.extractall(path=dst_path, numeric_owner=True, filter=tar_filter)
+
+    if tar_will_create_folder:
+        # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
+        group_id_to_use = group_id if group_id is not None else os.getgid()
+        user_id_to_use = owner_id if owner_id is not None else os.getuid()
+        mode_to_use = mode
+        os.chown(managed_path, user_id_to_use, group_id_to_use)
+        if mode_to_use is not None:
+            os.chmod(managed_path, mode_to_use)
+
+def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src_path, dst_path, dst_stat_resolved, tar_will_create_folder,
                        force=False, diff=None, dst_override_member_path=None):
-    log(client.module, f'{__file__}:{get_current_line_number()}: archive_mode: {archive_mode}, owner_id: {owner_id}, group_id: {group_id}, mode: {mode}, src_path: {src_path}, dest_path: {dst_path}')
     # itemize: https://download.samba.org/pub/rsync/rsync.1#opt--itemize-changes:~:text=The%20%22%25i%22%20escape%20has%20a%20cryptic%20output%20that%20is%2011%20letters%20long.%20The%20general%20format%20is%20like%20the%20string%20YXcstpoguax%2C%20where%20Y%20is%20replaced%20by%20the%20type%20of%20update%20being%20done%2C%20X%20is%20replaced%20by%20the%20file%2Dtype%2C%20and%20the%20other%20letters%20represent%20attributes%20that%20may%20be%20output%20if%20they%20are%20being%20modified.
     is_idempotent = True
     # Stat the local files
-    if dst_stat_ultimate is None:
+    if dst_stat_resolved is None:
         is_idempotent = False
         if diff is None:
             return is_idempotent
@@ -511,19 +542,19 @@ def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src
         # Docker Engine API returned for directory: 0b10000000000000000000000111101101
         # Docker Engine API returned for regular file: 0b110100100
         # Type
-        # if (src_stat_ultimate['mode'] & 0xF000) != (dst_stat_ultimate.st_mode & 0xF000):
+        # if (src_stat_resolved['mode'] & 0xF000) != (dst_stat_resolved.st_mode & 0xF000):
         #     return False
         # Size
-        # if src_stat_ultimate['size'] != dst_stat_ultimate.st_size:
-        #     src_size = src_stat_ultimate['size']
+        # if src_stat_resolved['size'] != dst_stat_resolved.st_size:
+        #     src_size = src_stat_resolved['size']
         #     return False
         # User
-        if user_id_to_use != dst_stat_ultimate.st_uid:
+        if user_id_to_use != dst_stat_resolved.st_uid:
             is_idempotent = False
             if diff is None:
                 return is_idempotent
         # Group
-        if group_id_to_use != dst_stat_ultimate.st_gid:
+        if group_id_to_use != dst_stat_resolved.st_gid:
             is_idempotent = False
             if diff is None:
                 return is_idempotent
@@ -531,11 +562,10 @@ def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src
         # Extract and compare just the 12 bits used in octal perms: oct(0b111111111111) = '0o7777'
         # | Setuid | Setgid | Sticky | Owner RWX | Group RWX | Others RWX |
         # | 1 bit  | 1 bit  | 1 bit  | 3 bits    | 3 bits    | 3 bits     |
-        if mode_to_use is not None and (dst_stat_ultimate.st_mode & 0o7777) != mode_to_use:
+        if mode_to_use is not None and (dst_stat_resolved.st_mode & 0o7777) != mode_to_use:
             is_idempotent = False
             if diff is None:
                 return is_idempotent
-
 
     # Get the tar content of container_path
     try:
@@ -629,57 +659,7 @@ def is_idempotent(client, container, archive_mode, owner_id, group_id, mode, src
     return is_idempotent
 
 
-def copy(client, container, managed_path, archive_mode, owner_id, group_id, mode,  src_path, dst_path, tar_will_create_folder,
-                       force=False, dst_override_member_path=None):
-    # Get the tar content of container_path
-    try:
-        stream = client.get_raw_stream(
-            '/containers/{0}/archive'.format(container),
-            params={'path': src_path},
-            headers={'Accept-Encoding': 'identity'},
-        )
-    except NotFound:
-        raise DockerFileNotFound('File {0} does not exist in container {1}'.format(src_path, container))
-
-    def tar_filter(member, path):
-        if not isinstance(member, tarfile.TarInfo):
-            raise ValueError('member is not a TarInfo object')
-        # Derive path that file will be written to when expanded
-        dst_member_path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else os.path.join(dst_path, member.path)
-        # Stat the managed path
-        dst_member_stat = None
-        try:
-            dst_member_stat = stat_managed_file(dst_member_path)
-        except FileNotFoundError:
-            pass
-        # Check force settings first
-        if dst_member_stat is not None and force is False:
-            return None
-        group_id_to_use = group_id if group_id is not None else member.gid if archive_mode else os.getgid()
-        user_id_to_use = owner_id if owner_id is not None else member.uid if archive_mode else os.getuid()
-        mode_to_use = mode if mode is not None else member.mode
-        member.gid = group_id_to_use
-        member.uid = user_id_to_use
-        member.mode = mode_to_use
-        member.path = os.path.join(dst_path, dst_override_member_path) if dst_override_member_path is not None else member.path
-        # This is returning the correct values, but looks like unless `become: True` specified, will silently fail and not change UID/GID.
-        # Added validation at front of module to ensure we are super user.
-        return member
-
-    with tarfile.open(fileobj=_stream_generator_to_fileobj(stream), mode='r|') as tar:
-        # Foreach member
-        tar.extractall(path=dst_path, numeric_owner=True, filter=tar_filter)
-
-    if tar_will_create_folder:
-        # Get the path itself (where the archive is being extracted) to have the correct owner, group, and mode
-        group_id_to_use = group_id if group_id is not None else os.getgid()
-        user_id_to_use = owner_id if owner_id is not None else os.getuid()
-        mode_to_use = mode
-        os.chown(managed_path, user_id_to_use, group_id_to_use)
-        if mode_to_use is not None:
-            os.chmod(managed_path, mode_to_use)
-
-def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, dst_path, dst_stat_ultimate):
+def determine_paths(managed_path, container_path, src_path, src_stat_resolved, dst_path, dst_stat_resolved):
     paths = {
         'src_stat_path': container_path,
         'dst_expand_path': managed_path,
@@ -690,11 +670,11 @@ def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, d
     if not isinstance(managed_path, str):
         raise ValueError('managed_path must be instance of str')
     # IF SRC_PATH is a directory (IF SRC_PATH specifies a directory OR a followed symlink to a directory)
-    if container_mode_is_dir(src_stat_ultimate['mode']):
+    if container_mode_is_dir(src_stat_resolved['mode']):
         # DEST_PATH exists
-        if dst_stat_ultimate is not None:
+        if dst_stat_resolved is not None:
             # DEST_PATH exists and is a directory
-            if stat.S_ISDIR(dst_stat_ultimate.st_mode):
+            if stat.S_ISDIR(dst_stat_resolved.st_mode):
                 # SRC_PATH does end with /. (that is: slash followed by dot)
                 # However, be it noted that this is all we need to drive the behavior expected - we just need to set the dest expand path here.
                 if container_path.endswith(f'{os.path.sep}.'):
@@ -718,10 +698,10 @@ def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, d
         # DEST_PATH ends with "/"
         if managed_path.endswith(os.path.sep):
             # DEST_PATH does not exist and ends with /
-            if dst_stat_ultimate is None:
+            if dst_stat_resolved is None:
                 # Error condition: the destination directory must exist.
                 raise FileNotFoundError(f'No such directory: {managed_path}')
-            if not stat.S_ISDIR(dst_stat_ultimate.st_mode):
+            if not stat.S_ISDIR(dst_stat_resolved.st_mode):
                 # Error condition: the destination directory must exist.
                 raise ValueError(f'Not a directory: {managed_path}')
             # the file is saved to a file created at DEST_PATH
@@ -729,7 +709,7 @@ def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, d
         # DEST_PATH does not end with "/"
         else:
             # ...and is a directory OR a followed symlink to a directory
-            if dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode):
+            if dst_stat_resolved is not None and stat.S_ISDIR(dst_stat_resolved.st_mode):
                 # the file is copied into this directory using the basename from SRC_PATH
                 paths['dst_expand_path'] = dst_path
             # ...and is a file (not a directory)
@@ -740,8 +720,7 @@ def determine_paths(managed_path, container_path, src_path, src_stat_ultimate, d
                 paths['dst_override_member_path'] = os.path.basename(dst_path)
     return paths
 
-def determine_stats(client, container, src_stat_path,
-dst_expand_path, follow_links, local_follow_links):
+def determine_stats(client, container, src_stat_path, dst_expand_path, follow_links, local_follow_links):
     src_stat_copy_dir_files_only = src_stat_path.endswith(f'{os.path.sep}.')
     src_stat = stat_container_file(
         client,
@@ -770,27 +749,25 @@ dst_expand_path, follow_links, local_follow_links):
             dst_stat_follow_links = stat_managed_file_resolve_symlinks(dst_expand_path)
         except FileNotFoundError:
             pass
-    src_stat_ultimate = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
+    src_stat_resolved = src_stat_follow_links if src_is_followed_symlink is not False else src_stat
     # Compare the stats
-    # src_stat_ultimate: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_ultimate: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
-    if src_stat_ultimate is None:
+    # src_stat_resolved: {'name': 'testdir', 'size': 4096, 'mode': 2147484141, 'mtime': '2024-07-20T18:28:59.4733528Z', 'linkTarget': ''}, dst_stat_resolved: os.stat_result(st_mode=16893, st_ino=1142, st_dev=64768, st_nlink=3, st_uid=0, st_gid=1001, st_size=4096, st_atime=1721349833, st_mtime=1721349750, st_ctime=1721350455)
+    if src_stat_resolved is None:
         raise DockerFileNotFound(
                     'File {src_stat_path} does not exist in container {container}'
                     .format(src_stat_path=src_stat_path, container=container)
                 )
-    dst_stat_ultimate = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
-    tar_will_create_folder = dst_stat_ultimate is not None and stat.S_ISDIR(dst_stat_ultimate.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
+    dst_stat_resolved = dst_stat_follow_links if dst_is_followed_symlink is not False else dst_stat
+    tar_will_create_folder = dst_stat_resolved is not None and stat.S_ISDIR(dst_stat_resolved.st_mode) and not src_stat_copy_dir_files_only and not container_mode_is_regular(src_stat['mode'])
     return {
         'src_stat': src_stat,
         'src_path': src_path,
-        'src_stat_ultimate': src_stat_ultimate,
+        'src_stat_resolved': src_stat_resolved,
         'dst_stat': dst_stat,
         'dst_path': dst_path,
-        'dst_stat_ultimate': dst_stat_ultimate,
+        'dst_stat_resolved': dst_stat_resolved,
         'tar_will_create_folder': tar_will_create_folder,
     }
-
-
 
 def copy_file_out_of_container(client, container, managed_path, container_path, follow_links, local_follow_links, archive_mode,
                              owner_id, group_id, mode, force=False, diff=None):
@@ -810,12 +787,12 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         managed_path,
         container_path,
         stats['src_path'],
-        stats['src_stat_ultimate'],
+        stats['src_stat_resolved'],
         stats['dst_path'],
-        stats['dst_stat_ultimate'],
+        stats['dst_stat_resolved'],
     )
 
-    ultimate_stats = determine_stats(
+    stats_resolved = determine_stats(
         client,
         container,
         paths['src_stat_path'],
@@ -831,10 +808,10 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         owner_id,
         group_id,
         mode,
-        ultimate_stats['src_path'],
-        ultimate_stats['dst_path'],
-        ultimate_stats['dst_stat_ultimate'],
-        ultimate_stats['tar_will_create_folder'],
+        stats_resolved['src_path'],
+        stats_resolved['dst_path'],
+        stats_resolved['dst_stat_resolved'],
+        stats_resolved['tar_will_create_folder'],
         force=force,
         diff=diff,
         dst_override_member_path=paths['dst_override_member_path'],
@@ -850,9 +827,9 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
             owner_id,
             group_id,
             mode,
-            ultimate_stats['src_path'],
-            ultimate_stats['dst_path'],
-            tar_will_create_folder=ultimate_stats['tar_will_create_folder'],
+            stats_resolved['src_path'],
+            stats_resolved['dst_path'],
+            tar_will_create_folder=stats_resolved['tar_will_create_folder'],
             force=force,
             dst_override_member_path=paths['dst_override_member_path'],
         )
@@ -860,9 +837,6 @@ def copy_file_out_of_container(client, container, managed_path, container_path, 
         changed=changed,
         container_path=container_path,
         managed_path=managed_path,
-        mode=mode,
-        owner_id=owner_id,
-        group_id=group_id,
     )
     if isinstance(diff, list):
         result['diff'] = {
@@ -884,14 +858,6 @@ def mode_to_int_literal(mode):
     except OverflowError:
         raise ValueError('"{0}" is not a valid mode'.format(mode))
     return return_mode
-
-def normalize_container_path_to_abspath(path):
-    if not isinstance(path, str):
-        raise ValueError('Path "{0}" is not a valid path'.format(path))
-    if not path.startswith(os.path.sep):
-        path = os.path.join(os.path.sep, path)
-    path = os.path.normpath(path)
-    return path
 
 def main():
     argument_spec = dict(
@@ -930,7 +896,6 @@ def main():
     if (archive_mode is True or owner_id is not None or group_id is not None) and not os.environ.get("SUDO_UID"):
         client.fail(f'The archive_mode, owner_id, and group_id parameters require running this module as a super user')
 
-
     try:
         mode = mode_to_int_literal(mode)
     except ValueError as exc:
@@ -967,8 +932,6 @@ def main():
         client.fail(to_native(exc))
     except OSError as exc:
         client.fail('Unexpected error: {exc}'.format(exc=to_native(exc)), exception=traceback.format_exc())
-
-
 
 if __name__ == '__main__':
     main()
