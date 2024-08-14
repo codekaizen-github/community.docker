@@ -39,6 +39,9 @@ jobs:
           - name: simple-2
             tag: tag
             tag-as-latest: true
+          - name: healthcheck
+            tag: check
+            tag-as-latest: true
 
     steps:
       - name: Check out repository
@@ -52,6 +55,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: false  # true (default) results in warnings since we don't use Go modules
 
       - name: Build ${{ matrix.name }} image
         run: |

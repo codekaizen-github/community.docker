@@ -497,16 +497,16 @@ class ServicesManager(BaseComposeManager):
             args.append('--no-start')
         if dry_run:
             args.append('--dry-run')
+        args.append('--')
         for service in self.services:
             args.append(service)
-        args.append('--')
         return args
 
     def cmd_up(self):
         result = dict()
         args = self.get_up_cmd(self.check_mode)
         rc, stdout, stderr = self.client.call_cli(*args, cwd=self.project_src)
-        events = self.parse_events(stderr, dry_run=self.check_mode)
+        events = self.parse_events(stderr, dry_run=self.check_mode, nonzero_rc=rc != 0)
         self.emit_warnings(events)
         self.update_result(result, events, stdout, stderr, ignore_service_pull_events=True)
         self.update_failed(result, events, args, stdout, stderr, rc)
@@ -518,9 +518,9 @@ class ServicesManager(BaseComposeManager):
             args.extend(['--timeout', '%d' % self.timeout])
         if dry_run:
             args.append('--dry-run')
+        args.append('--')
         for service in self.services:
             args.append(service)
-        args.append('--')
         return args
 
     def _are_containers_stopped(self):
@@ -537,7 +537,7 @@ class ServicesManager(BaseComposeManager):
         # Make sure all containers are created
         args_1 = self.get_up_cmd(self.check_mode, no_start=True)
         rc_1, stdout_1, stderr_1 = self.client.call_cli(*args_1, cwd=self.project_src)
-        events_1 = self.parse_events(stderr_1, dry_run=self.check_mode)
+        events_1 = self.parse_events(stderr_1, dry_run=self.check_mode, nonzero_rc=rc_1 != 0)
         self.emit_warnings(events_1)
         self.update_result(result, events_1, stdout_1, stderr_1, ignore_service_pull_events=True)
         is_failed_1 = is_failed(events_1, rc_1)
@@ -545,7 +545,7 @@ class ServicesManager(BaseComposeManager):
             # Make sure all containers are stopped
             args_2 = self.get_stop_cmd(self.check_mode)
             rc_2, stdout_2, stderr_2 = self.client.call_cli(*args_2, cwd=self.project_src)
-            events_2 = self.parse_events(stderr_2, dry_run=self.check_mode)
+            events_2 = self.parse_events(stderr_2, dry_run=self.check_mode, nonzero_rc=rc_2 != 0)
             self.emit_warnings(events_2)
             self.update_result(result, events_2, stdout_2, stderr_2)
         else:
@@ -571,16 +571,16 @@ class ServicesManager(BaseComposeManager):
             args.extend(['--timeout', '%d' % self.timeout])
         if dry_run:
             args.append('--dry-run')
+        args.append('--')
         for service in self.services:
             args.append(service)
-        args.append('--')
         return args
 
     def cmd_restart(self):
         result = dict()
         args = self.get_restart_cmd(self.check_mode)
         rc, stdout, stderr = self.client.call_cli(*args, cwd=self.project_src)
-        events = self.parse_events(stderr, dry_run=self.check_mode)
+        events = self.parse_events(stderr, dry_run=self.check_mode, nonzero_rc=rc != 0)
         self.emit_warnings(events)
         self.update_result(result, events, stdout, stderr)
         self.update_failed(result, events, args, stdout, stderr, rc)
@@ -598,16 +598,16 @@ class ServicesManager(BaseComposeManager):
             args.extend(['--timeout', '%d' % self.timeout])
         if dry_run:
             args.append('--dry-run')
+        args.append('--')
         for service in self.services:
             args.append(service)
-        args.append('--')
         return args
 
     def cmd_down(self):
         result = dict()
         args = self.get_down_cmd(self.check_mode)
         rc, stdout, stderr = self.client.call_cli(*args, cwd=self.project_src)
-        events = self.parse_events(stderr, dry_run=self.check_mode)
+        events = self.parse_events(stderr, dry_run=self.check_mode, nonzero_rc=rc != 0)
         self.emit_warnings(events)
         self.update_result(result, events, stdout, stderr)
         self.update_failed(result, events, args, stdout, stderr, rc)
@@ -636,6 +636,7 @@ def main():
     client = AnsibleModuleDockerClient(
         argument_spec=argument_spec,
         supports_check_mode=True,
+        needs_api_version=False,
         **argspec_ex
     )
 
